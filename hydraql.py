@@ -9,6 +9,7 @@ Multi-DB, multi-language, parallel CodeQL runner with:
 - Parallel execution with per-query outputs, merged into CSV/JSON/SARIF
 - Severity filtering, fancy colored output, dry run, auto `codeql pack install`
 - ASCII summary chart
+- Accurate per-query counts for CSV/JSON/SARIF and ensured CSV headers
 """
 import argparse
 import subprocess
@@ -20,6 +21,7 @@ import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from typing import List, Tuple, Optional, Dict, Any
 
 # ANSI color codes
 COL_RESET = "\033[0m"
@@ -86,13 +88,16 @@ def db_structure_ok(db_dir: Path) -> bool:
     """Heuristic: a CodeQL DB typically has subdirs like db-<lang> and codeql-database.yml"""
     if not (db_dir / 'codeql-database.yml').exists():
         return False
-    has_sub = any(child.is_dir() and child.name.startswith('db-') for child in db_dir.iterdir())
+    try:
+        has_sub = any(child.is_dir() and child.name.startswith('db-') for child in db_dir.iterdir())
+    except FileNotFoundError:
+        has_sub = False
     return has_sub
 
 
 def detect_databases(langs, db_root: Path, fancy: bool, allow_missing: bool):
     print(f"[*] {APP_NAME} looking for CodeQL databases in {db_root}/...")
-    found = {}
+    found: Dict[str, Path] = {}
     missing = []
     unfinalized = []
     for raw in langs:
@@ -122,7 +127,7 @@ def detect_databases(langs, db_root: Path, fancy: bool, allow_missing: bool):
     return found
 
 
-def infer_query_language(query_path: Path) -> str | None:
+def infer_query_language(query_path: Path) -> Optional[str]:
     try:
         head = query_path.read_text(encoding='utf-8', errors='ignore')[:4000]
         m = IMPORT_LANG_RE.search(head)
@@ -136,7 +141,7 @@ def infer_query_language(query_path: Path) -> str | None:
 def gather_queries(query_dirs, langs):
     langs = [alias_lang(l) for l in langs]
     langset = set(langs)
-    all_queries = []
+    all_queries: List[Path] = []
     for qdir in query_dirs:
         base = Path(qdir)
         if not base.is_dir():
@@ -145,7 +150,7 @@ def gather_queries(query_dirs, langs):
         all_queries.extend(base.rglob('*.qls'))
     # dedupe
     all_queries = sorted(set(all_queries))
-    pairs = []  # (query_path, lang)
+    pairs: List[Tuple[Path,str]] = []  # (query_path, lang)
     for q in all_queries:
         detected = infer_query_language(q)
         if detected and detected in langset:
@@ -158,49 +163,169 @@ def gather_queries(query_dirs, langs):
     return pairs
 
 
-def run_query(query: Path, lang: str, db_path: Path, output_format: str, tmp_dir: Path, dry_run: bool, fancy: bool):
+# ---------- Per-format finding counters ----------
+
+def count_csv_findings(csv_path: Path, severity_filter: Optional[str]) -> int:
+    findings = 0
+    try:
+        with open(csv_path, newline='') as cf:
+            reader = csv.reader(cf)
+            header_seen = False
+            for row in reader:
+                if not header_seen:
+                    header_seen = True
+                    continue
+                if severity_filter:
+                    if len(row) > 2 and row[2].strip().upper() != severity_filter.upper():
+                        continue
+                findings += 1
+    except Exception:
+        return 0
+    return findings
+
+
+def count_json_findings(json_path: Path, severity_filter: Optional[str]) -> int:
+    try:
+        with open(json_path) as jf:
+            data = json.load(jf)
+    except Exception:
+        return 0
+    total = 0
+    # If list of results
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            if severity_filter:
+                sev = str(item.get('severity', '')).upper() or str(item.get('level','')).upper() or str(item.get('properties',{}).get('severity','')).upper()
+                if sev != severity_filter.upper():
+                    continue
+            total += 1
+        return total
+    # If dict with 'results'
+    if isinstance(data, dict):
+        results = data.get('results')
+        if isinstance(results, list):
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                if severity_filter:
+                    sev = str(item.get('severity', '')).upper() or str(item.get('level','')).upper() or str(item.get('properties',{}).get('severity','')).upper()
+                    if sev != severity_filter.upper():
+                        continue
+                total += 1
+            return total
+    return 0
+
+
+def build_rule_severity_map(run: Dict[str, Any]) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    tool = run.get('tool', {})
+    driver = tool.get('driver', {})
+    for rule in driver.get('rules', []) or []:
+        rid = rule.get('id') or rule.get('name')
+        sev = ''
+        props = rule.get('properties', {}) or {}
+        # Prefer explicit severity fields
+        sev = props.get('severity') or props.get('problem.severity') or ''
+        if not sev:
+            default_cfg = rule.get('defaultConfiguration', {}) or {}
+            sev = default_cfg.get('level', '')
+        mapping[str(rid)] = str(sev)
+    return mapping
+
+
+def result_matches_severity(res: Dict[str, Any], rules_map: Dict[str, str], severity_filter: str) -> bool:
+    target = severity_filter.upper()
+    candidates = []
+    props = res.get('properties', {}) or {}
+    candidates.append(str(res.get('severity','')).upper())
+    candidates.append(str(res.get('level','')).upper())
+    candidates.append(str(props.get('severity','')).upper())
+    candidates.append(str(props.get('problem.severity','')).upper())
+    rid = res.get('ruleId') or res.get('rule',{}).get('id')
+    if rid and rid in rules_map:
+        candidates.append(str(rules_map[rid]).upper())
+    # Accept exact match or substring match (best-effort across schemas)
+    for c in candidates:
+        if not c:
+            continue
+        if c == target or target in c:
+            return True
+    return False
+
+
+def count_sarif_findings(sarif_path: Path, severity_filter: Optional[str]) -> int:
+    try:
+        with open(sarif_path) as sf:
+            data = json.load(sf)
+    except Exception:
+        return 0
+    total = 0
+    if not isinstance(data, dict):
+        return 0
+    for run in data.get('runs', []) or []:
+        rules_map = build_rule_severity_map(run)
+        for res in run.get('results', []) or []:
+            if severity_filter:
+                if not result_matches_severity(res, rules_map, severity_filter):
+                    continue
+            total += 1
+    return total
+
+
+# ---------- Query runner & mergers ----------
+
+def run_query(query: Path, lang: str, db_path: Path, output_format: str, tmp_dir: Path, dry_run: bool, fancy: bool, severity_filter: Optional[str]):
+    """Run a single query and return (output_file, findings_count_for_this_query)."""
     out_file = tmp_dir / f"{query.stem}_{lang}.{output_format}"
     cmd = ['codeql','database','analyze', str(db_path), '--format', output_format, '--output', str(out_file), str(query)]
     if fancy:
         print(f"{COL_CYAN}🌐 [{lang}]{COL_RESET} Running query: {query.name}")
     if dry_run:
-        return None
+        return None, 0
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError:
-        return None
-    return out_file if out_file.exists() else None
+        return None, 0
+    if not out_file.exists():
+        return None, 0
+
+    if output_format == 'csv':
+        findings = count_csv_findings(out_file, severity_filter)
+    elif output_format == 'json':
+        findings = count_json_findings(out_file, severity_filter)
+    else:  # sarif
+        findings = count_sarif_findings(out_file, severity_filter)
+    return out_file, findings
 
 
-def merge_csv(results, output_file, severity_filter):
-    header = None
-    rows = []
+def merge_csv(results: List[Path], output_file: str, severity_filter: Optional[str]):
+    fixed_header = ["Name","Description","Severity","Message","Path","Start line","Start column","End line","End column"]
+    rows: List[List[str]] = []
     for file in results:
         if not file or not file.exists():
             continue
         with open(file, newline='') as cf:
             reader = csv.reader(cf)
-            try:
-                hdr = next(reader)
-            except StopIteration:
-                continue
-            if header is None:
-                header = hdr
+            header_seen = False
             for row in reader:
+                if not header_seen:
+                    header_seen = True
+                    continue
                 if severity_filter:
                     if len(row) > 2 and row[2].strip().upper() != severity_filter.upper():
                         continue
                 rows.append(row)
-    if header is None:
-        header = ["Name","Description","Severity","Message","Path","Start line","Start column","End line","End column"]
+    # Always write fixed header (even if no rows)
     with open(output_file, 'w', newline='') as outf:
         writer = csv.writer(outf)
-        writer.writerow(header)
+        writer.writerow(fixed_header)
         writer.writerows(rows)
     return len(rows)
 
 
-def merge_json(results, output_file, severity_filter):
+def merge_json(results: List[Path], output_file: str, severity_filter: Optional[str]):
     merged = []
     for file in results:
         if not file or not file.exists():
@@ -213,17 +338,19 @@ def merge_json(results, output_file, severity_filter):
         if isinstance(data, list):
             for item in data:
                 if severity_filter and isinstance(item, dict):
-                    if str(item.get('severity','')).upper() != severity_filter.upper():
+                    sev = str(item.get('severity','')).upper() or str(item.get('level','')).upper() or str(item.get('properties',{}).get('severity','')).upper()
+                    if sev != severity_filter.upper():
                         continue
                 merged.append(item)
         else:
+            # Best-effort passthrough; severity filter not applied at top-level dict
             merged.append(data)
     with open(output_file, 'w') as outf:
         json.dump(merged, outf, indent=2)
-    return len(merged)
+    return len(merged) if isinstance(merged, list) else 1
 
 
-def merge_sarif(results, output_file):
+def merge_sarif(results: List[Path], output_file: str):
     merged = { '$schema': 'https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0.json', 'version': '2.1.0', 'runs': [] }
     for file in results:
         if not file or not file.exists():
@@ -241,7 +368,7 @@ def merge_sarif(results, output_file):
     return total
 
 
-def ascii_chart(with_results, without_results, fancy):
+def ascii_chart(with_results: int, without_results: int, fancy: bool):
     title = f"\n{COL_BLUE}📊 Result Summary Chart{COL_RESET}" if fancy else "\nResult Summary Chart"
     print(title)
     print(f"{'Category':<30} Bar")
@@ -283,18 +410,22 @@ def main():
     tmp_dir.mkdir(exist_ok=True)
 
     # Run in parallel
-    results = []
+    results: List[Path] = []
+    per_query_counts: List[int] = []
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         futs = []
         for q, lang in pairs:
             dbp = found_dbs.get(lang)
             if not dbp:
                 continue
-            futs.append(executor.submit(run_query, q, lang, dbp, args.output_format, tmp_dir, args.dry_run, args.fancy))
+            futs.append(executor.submit(
+                run_query, q, lang, dbp, args.output_format, tmp_dir, args.dry_run, args.fancy, args.severity_filter
+            ))
         for fut in as_completed(futs):
-            out = fut.result()
-            if out:
-                results.append(out)
+            out_file, count = fut.result()
+            if out_file:
+                results.append(out_file)
+            per_query_counts.append(count)
 
     # Merge outputs
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -307,7 +438,7 @@ def main():
         total = merge_sarif(results, output_file)
 
     ran = len(pairs)
-    with_results = 1 if total > 0 else 0
+    with_results = sum(1 for n in per_query_counts if n > 0)
     without_results = ran - with_results
 
     print("\n🔎 Summary:")
@@ -316,7 +447,7 @@ def main():
     print(f"Total findings:          {total}")
     ascii_chart(with_results, without_results, args.fancy)
 
-    msg = f"✅ Done! Results saved to {output_file}" if total else f"⚠️  No results. Wrote empty template to {output_file}"
+    msg = f"✅ Done! Results saved to {output_file}" if total else f"⚠️  No results. Wrote header to {output_file}"
     if args.fancy:
         color = COL_GREEN if total else COL_YELLOW
         print(f"{color}{msg}{COL_RESET}")

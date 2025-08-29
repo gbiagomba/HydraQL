@@ -1,3 +1,5 @@
+![alt tag](rsc/hydraql-logo.png)
+
 # HydraQL
 
 ## Background / Lore
