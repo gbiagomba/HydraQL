@@ -1,4 +1,4 @@
-![alt tag](rsc/hydraql-logo.png)
+![alt tag](img/hydraql-logo.png)
 
 # HydraQL
 
