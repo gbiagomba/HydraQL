@@ -24,6 +24,8 @@ KILL_LOCK_PROC    ?= 0
 AUTO_FINALIZE_DB  ?= 1
 AUTO_INIT_DB      ?= 0
 SOURCE_ROOT       ?=
+QUERY_TIMEOUT     ?= 600
+NO_TIMEOUT        ?= 0
 
 # Docker
 IMAGE         ?= hydraql:latest
@@ -72,19 +74,27 @@ endif
 ifneq ($(strip $(SOURCE_ROOT)),)
   SRCROOT_FLAG := --source-root $(SOURCE_ROOT)
 endif
+ifneq ($(QUERY_TIMEOUT),)
+  TIMEOUT_FLAG := --query-timeout $(QUERY_TIMEOUT)
+endif
+ifeq ($(NO_TIMEOUT),1)
+  TIMEOUT_FLAG := --no-timeout
+endif
 
 .PHONY: help run run-sarif run-json run-high docker-build docker-run docker-shell clean
 
 help:
 	@echo "HydraQL Makefile"
-	@echo " make run             # run HydraQL locally"
-	@echo " make run-sarif       # SARIF output"
-	@echo " make run-json        # JSON output"
-	@echo " make run-high        # severity=HIGH (loose)"
-	@echo " make docker-build    # build Docker image"
-	@echo " make docker-run      # run in Docker"
-	@echo " make docker-shell    # shell inside container"
-	@echo " make clean           # remove local artifacts"
+	@echo " make run                        # run HydraQL locally"
+	@echo " make run-sarif                  # SARIF output"
+	@echo " make run-json                   # JSON output"
+	@echo " make run-high                   # severity=HIGH (loose)"
+	@echo " make run QUERY_TIMEOUT=1800     # 30-min per-query timeout"
+	@echo " make run NO_TIMEOUT=1           # disable timeout"
+	@echo " make docker-build               # build Docker image"
+	@echo " make docker-run                 # run in Docker"
+	@echo " make docker-shell               # shell inside container"
+	@echo " make clean                      # remove local artifacts"
 
 run:
 	$(PY) $(SCRIPT) \
@@ -106,7 +116,8 @@ run:
 	  $(KILL_LOCK_FLAG) \
 	  $(FINALIZE_FLAG) \
 	  $(INIT_FLAG) \
-	  $(SRCROOT_FLAG)
+	  $(SRCROOT_FLAG) \
+	  $(TIMEOUT_FLAG)
 
 run-sarif:
 	$(MAKE) run FORMAT=sarif
@@ -148,7 +159,8 @@ docker-run:
 	  $(KILL_LOCK_FLAG) \
 	  $(FINALIZE_FLAG) \
 	  $(INIT_FLAG) \
-	  $(SRCROOT_FLAG)
+	  $(SRCROOT_FLAG) \
+	  $(TIMEOUT_FLAG)
 
 docker-shell:
 	docker run --rm -it \

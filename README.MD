@@ -33,6 +33,8 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
 - 🔍 Severity filtering (`--severity HIGH`)
 - 📊 ASCII summary chart
 - 📂 Outputs in CSV, JSON, or SARIF
+- ⏱️ Per-query timeout (`--query-timeout 600`) — never hang on a slow suite
+- 🔄 Real-time progress ticker: shows elapsed time every 5s so you know queries are alive
 
 ---
 
@@ -80,6 +82,8 @@ python3 hydraql.py --help
 --dry-run               Show what would run without executing
 --pack-install          Auto-run `codeql pack install`
 --allow-missing-db      Continue even if some DBs are missing/unfinalized
+--query-timeout <sec>   Per-query timeout in seconds (default: 600)
+--no-timeout            Disable per-query timeout entirely
 ```
 
 ## Examples
@@ -100,6 +104,21 @@ python hydraql.py \
   --langs "java" \
   --query-dir "~/Git/codeql" \
   --severity HIGH
+
+# Large codebase — extend timeout to 30 minutes per query
+python hydraql.py \
+  --db-root ./cqlDB \
+  --langs "javascript" \
+  --query-dir "~/Git/codeql" \
+  --query-timeout 1800 \
+  --fancy
+
+# Disable timeout entirely (not recommended for CI)
+python hydraql.py \
+  --db-root ./cqlDB \
+  --langs "javascript" \
+  --query-dir "~/Git/codeql" \
+  --no-timeout
 ```
 
 ---

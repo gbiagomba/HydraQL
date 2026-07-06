@@ -2,6 +2,13 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [1.8.0] - 2026-07-06
+### Added
+- **Per-query timeout** (`--query-timeout <seconds>`, default 600s): CodeQL queries that exceed the limit are killed, logged to `hydraql_failures.log` as `TIMEOUT after Xs: <query> on <lang>`, and skipped — the scan continues without them.
+- **`--no-timeout` flag**: Disables the per-query timeout entirely for cases where long runtimes are expected (e.g., large suites on massive codebases).
+- **Real-time progress ticker**: A background thread prints elapsed time every 5 seconds (`⏳ [lang] query.ql … Xs elapsed`) to stderr during query execution, making it easy to distinguish a slow query from a hung one.
+- **Timed-out query count in summary**: The final summary now reports how many queries timed out, with a hint to increase `--query-timeout` or use `--no-timeout`.
+
 ## [1.7.2] - 2025-09-04
 ### Added
 - Per-DB concurrency control: HydraQL runs queries **sequentially per DB** to avoid IMB cache contention while still running different DBs in parallel.

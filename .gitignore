@@ -1,0 +1,67 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# IDE / Editor junk
+.vscode/
+.idea/
+*.swp
+*.swo
+*.DS_Store
+*.iml
+
+# Logs and temp
+*.log
+tmp/
+tmp_*/
+*.tmp
+*.bak
+
+# HydraQL-specific
+tmp_hydraql_output/
+HydraQL_output-*.csv
+HydraQL_output-*.json
+HydraQL_output-*.sarif
+
+# Docker / env
+.dockerignore
+*.env
+
+# GitHub / CI
+.github/
+
+# Claude Code local plugin data
+.greprules/

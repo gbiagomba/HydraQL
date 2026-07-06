@@ -17,8 +17,10 @@ HydraQL — Parallel CodeQL Scanning Engine
 - Failure logging + verbose diagnostics
 - Suite preference: prefer `.qls` if present; `--suite-only` to force suites
 - Summary with ASCII chart
-- NEW: per-DB single concurrency (prevents IMB lock races)
-- NEW: finalize/lock-aware retry once per query
+- Per-DB single concurrency (prevents IMB lock races)
+- Finalize/lock-aware retry once per query
+- Per-query timeout (--query-timeout, default 600s) with --no-timeout to disable
+- Real-time progress ticker: prints elapsed time every 5s for long-running queries
 """
 import argparse
 import subprocess
@@ -80,6 +82,11 @@ def parse_args():
 
     # Skip unusable DBs unless forced
     p.add_argument('--force-scan-unready', action='store_true', help='Force scanning even if DB looks empty/unusable')
+
+    # Timeout
+    p.add_argument('--query-timeout', dest='query_timeout', type=int, default=600, metavar='SECONDS',
+                   help='Per-query timeout in seconds (default: 600). Use --no-timeout to disable.')
+    p.add_argument('--no-timeout', action='store_true', help='Disable per-query timeout (run until CodeQL finishes)')
     return p.parse_args()
 
 # -------------------------
@@ -96,10 +103,10 @@ def normalize_query_dirs(raw_dirs):
                 out.append(Path(tok).expanduser())
     return out
 
-def run_cmd(cmd: List[str], verbose: bool=False) -> subprocess.CompletedProcess:
+def run_cmd(cmd: List[str], verbose: bool=False, timeout: Optional[int]=None) -> subprocess.CompletedProcess:
     if verbose:
         print("   cmd:", " ".join(cmd))
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
 
 def install_query_packs(fancy, verbose):
     if fancy:
@@ -443,6 +450,17 @@ def db_semaphore(db_path: Path) -> threading.Semaphore:
         return sem
 
 # -------------------------
+# Progress ticker
+# -------------------------
+def _progress_ticker(label: str, stop_event: threading.Event) -> None:
+    start = _now()
+    while not stop_event.wait(5.0):
+        elapsed = int(_now() - start)
+        print(f"\r  ⏳ {label} … {elapsed}s elapsed", end='', flush=True, file=sys.stderr)
+    # Clear the progress line so subsequent output isn't garbled
+    print(f"\r{' ' * 72}\r", end='', flush=True, file=sys.stderr)
+
+# -------------------------
 # Runner & mergers
 # -------------------------
 def analyze_once(query: Path, lang: str, db_path: Path, output_format: str, out_file: Path,
@@ -452,63 +470,82 @@ def analyze_once(query: Path, lang: str, db_path: Path, output_format: str, out_
     cmd = ['codeql','database','analyze', str(db_path), '--format', output_format, '--output', str(out_file), str(query)]
     if args.verbose:
         print("   cmd:", " ".join(cmd))
-    cp = run_cmd(cmd, args.verbose)
+    cp = run_cmd(cmd, args.verbose, timeout=getattr(args, 'query_timeout', None))
     return (cp.returncode == 0), cp.stderr
 
 def run_query(query: Path, lang: str, db_path: Path, output_format: str, tmp_dir: Path,
-              args) -> Tuple[Optional[Path], int]:
+              args) -> Tuple[Optional[Path], int, bool]:
+    """Returns (output_file, findings_count, timed_out)."""
     out_file = tmp_dir / f"{query.stem}_{lang}.{output_format}"
+    label = f"[{lang}] {query.name}"
     if args.fancy:
-        print(f"{COL_CYAN}🌐 [{lang}]{COL_RESET} {query.name}")
+        print(f"{COL_CYAN}🌐 {label}{COL_RESET}")
 
-    sem = db_semaphore(db_path)
-    with sem:  # ensure only one query per DB at a time
-        # First attempt
-        ok, stderr = analyze_once(query, lang, db_path, output_format, out_file, args)
-        if not ok:
-            err = stderr.decode(errors='ignore')
-            needs_finalize = 'needs to be finalized' in err
-            lock_hit = 'cache directory is already locked' in err or 'OverlappingFileLockException' in err
-            retried = False
+    stop_event = threading.Event()
+    ticker = threading.Thread(target=_progress_ticker, args=(label, stop_event), daemon=True)
+    ticker.start()
+    _t_start = _now()
 
-            if needs_finalize and args.auto_finalize_db and not args.dry_run:
-                print(f"  ↻ Finalizing {lang} DB (auto) due to analyze error, then retry…")
-                auto_finalize_db(db_path, args.verbose)
-                maybe_handle_cache_lock(db_path, args)
-                retried = True
+    try:
+        sem = db_semaphore(db_path)
+        with sem:  # ensure only one query per DB at a time
+            ok, stderr = analyze_once(query, lang, db_path, output_format, out_file, args)
+            if not ok:
+                err = stderr.decode(errors='ignore')
+                needs_finalize = 'needs to be finalized' in err
+                lock_hit = 'cache directory is already locked' in err or 'OverlappingFileLockException' in err
+                retried = False
 
-            if lock_hit:
-                print(f"  ↻ Clearing IMB locks for {lang} DB, then retry…")
-                # force aggressive unlock regardless of flag on retry
-                class _RetryArgs: pass
-                _a = _RetryArgs(); _a.unlock_cache=True; _a.check_lock_process=args.check_lock_process
-                _a.kill_lock_process=False; _a.verbose=args.verbose
-                maybe_handle_cache_lock(db_path, _a)
-                retried = True
+                if needs_finalize and args.auto_finalize_db and not args.dry_run:
+                    print(f"  ↻ Finalizing {lang} DB (auto) due to analyze error, then retry…")
+                    auto_finalize_db(db_path, args.verbose)
+                    maybe_handle_cache_lock(db_path, args)
+                    retried = True
 
-            if retried:
-                sleep(0.25)
-                ok, stderr = analyze_once(query, lang, db_path, output_format, out_file, args)
+                if lock_hit:
+                    print(f"  ↻ Clearing IMB locks for {lang} DB, then retry…")
+                    class _RetryArgs: pass
+                    _a = _RetryArgs(); _a.unlock_cache=True; _a.check_lock_process=args.check_lock_process
+                    _a.kill_lock_process=False; _a.verbose=args.verbose
+                    maybe_handle_cache_lock(db_path, _a)
+                    retried = True
 
-        if not ok:
-            with open('hydraql_failures.log','a') as flog:
-                flog.write(f"FAIL {query} on {lang}:\n{stderr.decode(errors='ignore')}\n")
-            if args.verbose:
-                print(f"{COL_RED}❌ Query failed:{COL_RESET} {query}")
-                print(stderr.decode(errors='ignore')[:600], "..." if len(stderr) > 600 else "")
-            return None, 0
+                if retried:
+                    sleep(0.25)
+                    ok, stderr = analyze_once(query, lang, db_path, output_format, out_file, args)
+
+            if not ok:
+                with open('hydraql_failures.log','a') as flog:
+                    flog.write(f"FAIL {query} on {lang}:\n{stderr.decode(errors='ignore')}\n")
+                if args.verbose:
+                    print(f"{COL_RED}❌ Query failed:{COL_RESET} {query}")
+                    print(stderr.decode(errors='ignore')[:600], "..." if len(stderr) > 600 else "")
+                return None, 0, False
+
+    except subprocess.TimeoutExpired:
+        elapsed = int(_now() - _t_start)
+        with open('hydraql_failures.log', 'a') as flog:
+            flog.write(f"TIMEOUT after {elapsed}s: {query} on {lang}\n")
+        if args.fancy:
+            print(f"\n{COL_YELLOW}⏱  Timed out after {elapsed}s:{COL_RESET} {query.name}")
+        else:
+            print(f"TIMEOUT after {elapsed}s: {label}")
+        return None, 0, True
+
+    finally:
+        stop_event.set()
+        ticker.join(timeout=1)
 
     if not out_file.exists():
-        return None, 0
+        return None, 0, False
 
-    # Count
     if output_format == 'csv':
         findings = count_csv_findings(out_file, args.severity_filter, args.strict_severity)
     elif output_format == 'json':
         findings = count_json_findings(out_file, args.severity_filter, args.strict_severity)
     else:
         findings = count_sarif_findings(out_file, args.severity_filter, args.strict_severity)
-    return out_file, findings
+    return out_file, findings, False
 
 def merge_csv(results: List[Path], output_file: str, severity_filter: Optional[str], strict: bool) -> int:
     fixed_header = ["Name","Description","Severity","Message","Path","Start line","Start column","End line","End column"]
@@ -574,6 +611,8 @@ def ascii_chart(with_results: int, without_results: int, fancy: bool):
 # -------------------------
 def main():
     args = parse_args()
+    if args.no_timeout:
+        args.query_timeout = None
     print(f"{COL_GREEN}{APP_NAME}{COL_RESET} starting…")
 
     query_dirs = normalize_query_dirs(args.query_dirs)
@@ -600,7 +639,7 @@ def main():
     tmp_dir = Path('tmp_hydraql_output'); tmp_dir.mkdir(exist_ok=True)
     Path('hydraql_failures.log').write_text("")
 
-    results: List[Path] = []; per_query_counts: List[int] = []
+    results: List[Path] = []; per_query_counts: List[int] = []; timed_out_count = 0
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         futs = []
         for q, lang in pairs:
@@ -610,7 +649,9 @@ def main():
                 continue
             futs.append(executor.submit(run_query, q, lang, dbp, args.output_format, tmp_dir, args))
         for fut in as_completed(futs):
-            out_file, count = fut.result()
+            out_file, count, timed_out = fut.result()
+            if timed_out:
+                timed_out_count += 1
             if out_file: results.append(out_file)
             per_query_counts.append(count)
 
@@ -627,6 +668,12 @@ def main():
     print("\n🔎 Summary:\n───────────────────────────────")
     print(f"Total queries run:       {ran}")
     print(f"Total findings:          {total}")
+    if timed_out_count:
+        hint = " (use --no-timeout or increase --query-timeout to allow more time)"
+        if args.fancy:
+            print(f"{COL_YELLOW}Timed out queries:       {timed_out_count}{hint}{COL_RESET}")
+        else:
+            print(f"Timed out queries:       {timed_out_count}{hint}")
     ascii_chart(with_results, without_results, args.fancy)
 
     if args.fancy:
