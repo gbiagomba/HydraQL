@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,17 +13,20 @@ import (
 	"sync"
 	"time"
 
+	pflag "github.com/spf13/pflag"
+
 	"github.com/gbiagomba/hydraql/internal/codeql"
 	"github.com/gbiagomba/hydraql/internal/merge"
 	"github.com/gbiagomba/hydraql/internal/report"
 )
 
-const version = "2.0.0"
+const version = "2.1.0"
 
-// stringSliceFlag supports repeated --flag value or --flag v1,v2
+// stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string
 
-func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
+func (s *stringSliceFlag) String() string     { return strings.Join(*s, ",") }
+func (s *stringSliceFlag) Type() string       { return "stringSlice" }
 func (s *stringSliceFlag) Set(value string) error {
 	for _, v := range strings.Split(value, ",") {
 		if v = strings.TrimSpace(v); v != "" {
@@ -35,45 +37,46 @@ func (s *stringSliceFlag) Set(value string) error {
 }
 
 func main() {
-	// ---- Flags ----
+	// ---- Flags (long and short) ----
 	var queryDirs stringSliceFlag
 
-	langs := flag.String("langs", "java,javascript,typescript,python",
+	langs := pflag.StringP("langs", "l", "java,javascript,typescript,python",
 		"Comma-separated languages to scan")
-	dbRoot := flag.String("db-root", "cqlDB",
+	dbRoot := pflag.StringP("db-root", "d", "cqlDB",
 		"Root of CodeQL databases (expects <db-root>/<lang>/codeql-database.yml)")
-	flag.Var(&queryDirs, "query-dir",
+	pflag.VarP(&queryDirs, "query-dir", "q",
 		"Query directory (repeat or comma-separate for multiple)")
-	threads := flag.Int("threads", 6, "Parallel worker goroutines")
-	flag.IntVar(threads, "parallel", 6, "Alias for --threads")
-	outputFormat := flag.String("output-format", "csv", "Output format: csv, json, sarif")
-	severityFilter := flag.String("severity", "", "Filter findings by severity (e.g. HIGH, CRITICAL)")
-	strictSeverity := flag.Bool("strict-severity", false, "Exact severity match only (no loose mapping)")
-	fancy := flag.Bool("fancy", false, "Colored output and ASCII chart")
-	dryRun := flag.Bool("dry-run", false, "List actions without running CodeQL")
-	packInstall := flag.Bool("pack-install", false, "Run `codeql pack install` before scanning")
-	allowMissingDB := flag.Bool("allow-missing-db", false, "Continue if some DBs are missing/unfinalized")
-	verbose := flag.Bool("verbose", false, "Verbose command logging and error details")
-	suiteOnly := flag.Bool("suite-only", false, "Run only .qls suites, skip individual .ql files")
+	threads := pflag.IntP("threads", "t", 6, "Parallel worker goroutines")
+	pflag.IntVar(threads, "parallel", 6, "")
+	_ = pflag.CommandLine.MarkHidden("parallel")
+	outputFormat := pflag.StringP("output-format", "o", "csv", "Output format: csv, json, sarif")
+	severityFilter := pflag.StringP("severity", "s", "", "Filter findings by severity (e.g. HIGH, CRITICAL)")
+	strictSeverity := pflag.BoolP("strict-severity", "S", false, "Exact severity match only (no loose mapping)")
+	fancy := pflag.BoolP("fancy", "f", false, "Colored output and ASCII chart")
+	dryRun := pflag.BoolP("dry-run", "n", false, "List actions without running CodeQL")
+	packInstall := pflag.BoolP("pack-install", "P", false, "Run `codeql pack install` before scanning")
+	allowMissingDB := pflag.BoolP("allow-missing-db", "m", false, "Continue if some DBs are missing/unfinalized")
+	verbose := pflag.BoolP("verbose", "v", false, "Verbose command logging and error details")
+	suiteOnly := pflag.BoolP("suite-only", "x", false, "Run only .qls suites, skip individual .ql files")
 
 	// Lock handling
-	unlockCache := flag.Bool("unlock-cache", false, "Delete stale IMB cache .lock files")
-	checkLockProc := flag.Bool("check-lock-process", false, "Inspect PID inside any cache .lock file")
-	killLockProc := flag.Bool("kill-lock-process", false, "DANGER: kill -9 the PID found in the cache .lock")
+	unlockCache := pflag.BoolP("unlock-cache", "u", false, "Delete stale IMB cache .lock files")
+	checkLockProc := pflag.BoolP("check-lock-process", "c", false, "Inspect PID inside any cache .lock file")
+	killLockProc := pflag.BoolP("kill-lock-process", "k", false, "DANGER: kill -9 the PID found in the cache .lock")
 
 	// DB automation
-	autoFinalizeDB := flag.Bool("auto-finalize-db", false, "Automatically finalize unfinalized DBs")
-	autoInitDB := flag.Bool("auto-init-db", false, "Create missing DBs (requires --source-root)")
-	sourceRoot := flag.String("source-root", "", "Source root for --auto-init-db")
-	forceScamUnready := flag.Bool("force-scan-unready", false, "Scan DBs that appear empty/unusable")
+	autoFinalizeDB := pflag.BoolP("auto-finalize-db", "F", false, "Automatically finalize unfinalized DBs")
+	autoInitDB := pflag.BoolP("auto-init-db", "i", false, "Create missing DBs (requires --source-root)")
+	sourceRoot := pflag.StringP("source-root", "r", "", "Source root for --auto-init-db")
+	forceScamUnready := pflag.BoolP("force-scan-unready", "R", false, "Scan DBs that appear empty/unusable")
 
 	// Timeout
-	queryTimeout := flag.Int("query-timeout", 600, "Per-query timeout in seconds (0 = no timeout)")
-	noTimeout := flag.Bool("no-timeout", false, "Disable per-query timeout entirely")
+	queryTimeout := pflag.IntP("query-timeout", "T", 600, "Per-query timeout in seconds (0 = no timeout)")
+	noTimeout := pflag.BoolP("no-timeout", "N", false, "Disable per-query timeout entirely")
 
-	showVersion := flag.Bool("version", false, "Print version and exit")
+	showVersion := pflag.BoolP("version", "V", false, "Print version and exit")
 
-	flag.Parse()
+	pflag.Parse()
 
 	if *showVersion {
 		fmt.Printf("HydraQL %s (Go edition)\n", version)
@@ -100,7 +103,6 @@ func main() {
 			langList = append(langList, codeql.LangAlias(l))
 		}
 	}
-	// de-duplicate
 	seen := map[string]bool{}
 	var uniqLangs []string
 	for _, l := range langList {
@@ -164,7 +166,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to create tmp dir: %v\n", err)
 		os.Exit(1)
 	}
-	// Reset failure log
 	_ = os.WriteFile("hydraql_failures.log", nil, 0644)
 
 	runCfg := &codeql.RunConfig{
@@ -262,7 +263,6 @@ func main() {
 		fmt.Printf("Results saved to %s\n", outputFile)
 	}
 
-	// Cleanup tmp
 	cleanTmp(tmpDir)
 }
 
@@ -300,7 +300,8 @@ func installPacks(fancy, verbose bool) {
 	if err != nil {
 		fmt.Printf("%s⚠️  Failed to install query packs%s\n", report.Yellow, report.Reset)
 		if verbose {
-			fmt.Printf("%s", string(out)[:min(len(out), 800)])
+			n := min(len(out), 800)
+			fmt.Printf("%s", string(out[:n]))
 		}
 	}
 }

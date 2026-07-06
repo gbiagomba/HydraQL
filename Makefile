@@ -1,5 +1,5 @@
 # ===== HydraQL Makefile =====
-VERSION       ?= 2.0.0
+VERSION       ?= 2.1.0
 
 # ---- Go ----
 GO            ?= go
@@ -90,7 +90,7 @@ ifeq ($(NO_TIMEOUT),1)
 endif
 
 .PHONY: help \
-        go-build go-build-all go-test go-vet go-clean \
+        build build-all go-test go-vet go-clean \
         run run-sarif run-json run-high \
         docker-build docker-run docker-shell clean
 
@@ -98,8 +98,8 @@ help:
 	@echo "HydraQL Makefile (v$(VERSION))"
 	@echo ""
 	@echo "=== Go (recommended) ==="
-	@echo " make go-build                   # build native binary → ./hydraql"
-	@echo " make go-build-all               # cross-compile all 6 targets → dist/"
+	@echo " make build                      # build native binary → ./hydraql"
+	@echo " make build-all                  # cross-compile all 6 targets → dist/"
 	@echo " make go-test                    # run Go tests"
 	@echo " make go-vet                     # run go vet"
 	@echo " make go-clean                   # remove dist/ and ./hydraql"
@@ -122,10 +122,10 @@ help:
 # ============================================================
 # Go targets
 # ============================================================
-go-build:
+build:
 	$(GO) build $(LDFLAGS) -o hydraql $(GO_CMD)
 
-go-build-all: $(DIST)
+build-all: $(DIST)
 	GOOS=darwin  GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(DIST)/hydraql-darwin-amd64   $(GO_CMD)
 	GOOS=darwin  GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(DIST)/hydraql-darwin-arm64   $(GO_CMD)
 	GOOS=linux   GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(DIST)/hydraql-linux-amd64    $(GO_CMD)

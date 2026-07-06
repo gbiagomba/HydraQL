@@ -56,12 +56,8 @@ HydraQL_output-*.csv
 HydraQL_output-*.json
 HydraQL_output-*.sarif
 
-# Docker / env
-.dockerignore
+# Env files
 *.env
-
-# GitHub / CI
-.github/
 
 # Claude Code local plugin data
 .greprules/

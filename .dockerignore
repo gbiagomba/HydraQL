@@ -1,0 +1,24 @@
+.git
+.gitignore
+.github/
+.greprules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.tmp/
+tmp/
+tmp_hydraql_output/
+node_modules/
+venv/
+.env
+.DS_Store
+# Pre-built binaries — Docker builds from source
+dist/
+/hydraql
+/hydraql-go
+# Python legacy not needed in image
+legacy/
+# Output artifacts
+HydraQL_output-*
+hydraql_failures.log

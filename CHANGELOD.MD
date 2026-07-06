@@ -2,6 +2,14 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.1.0] - 2026-07-06
+### Added
+- **Short flags** via `pflag` (github.com/spf13/pflag): every flag now has a short single-character alias (`-d`/`--db-root`, `-l`/`--langs`, `-q`/`--query-dir`, `-F`/`--auto-finalize-db`, `-m`/`--allow-missing-db`, `-u`/`--unlock-cache`, `-c`/`--check-lock-process`, `-f`/`--fancy`, `-v`/`--verbose`, etc.). All existing long flags unchanged — fully backward compatible.
+- **`--parallel` preserved** as a hidden alias for `--threads` to match existing command usage.
+- **GitHub Actions CI/release workflow** (`.github/workflows/ci-release.yml`): build-test matrix (ubuntu/macos-13/macos-14/windows), cross-compile release job (`make build-all` → 6 binaries + sha256 checksums → GitHub Release), multi-arch Docker build/publish.
+- **Go multi-stage Dockerfile**: `golang:1.21` builder + `debian:bookworm-slim` final; arch-aware CodeQL CLI install (amd64 `linux64`, arm64 `linux-arm64`); no Python runtime in image.
+- **Updated `.dockerignore`**: excludes `dist/`, `legacy/`, build artifacts.
+
 ## [2.0.0] - 2026-07-06
 ### Added
 - **Go rewrite**: HydraQL is now a single self-contained Go binary with no runtime dependencies.
