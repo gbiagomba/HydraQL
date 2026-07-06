@@ -2,6 +2,10 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.1.6] - 2026-07-06
+### Fixed
+- **Panic in `readLockPID`**: `FindStringSubmatch` returns `nil` when no match; slicing `nil[1:]` panicked with "slice bounds out of range [1:0]". Triggered whenever a `.lock` file exists with empty or non-standard content. Guard added: only slice when `len(m) > 1`.
+
 ## [2.1.5] - 2026-07-06
 ### Fixed
 - **`go install` now works**: Updated module path from `github.com/gbiagomba/hydraql` to `github.com/gbiagomba/hydraql/v2` per Go major-version convention. Without `/v2`, the Go toolchain ignored all v2.x.x tags and resolved `@latest` to v1.8.0 (Python, no `cmd/hydraql`).

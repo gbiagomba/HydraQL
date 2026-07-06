@@ -41,11 +41,12 @@ func readLockPID(lockFile string) int {
 	if err != nil {
 		return 0
 	}
-	m := lockPIDRe.FindStringSubmatch(string(data))
-	for _, g := range m[1:] {
-		if g != "" {
-			pid, _ := strconv.Atoi(g)
-			return pid
+	if m := lockPIDRe.FindStringSubmatch(string(data)); len(m) > 1 {
+		for _, g := range m[1:] {
+			if g != "" {
+				pid, _ := strconv.Atoi(g)
+				return pid
+			}
 		}
 	}
 	return 0
