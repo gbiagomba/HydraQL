@@ -10,6 +10,11 @@ on:
     branches:
       - '**'
 
+# Cancel in-progress runs on new push (branch pushes only; tag runs are never cancelled)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   BINARY_NAME: hydraql
   GO_VERSION: '1.26'

@@ -2,6 +2,11 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.1.3] - 2026-07-06
+### Fixed
+- **CI run backlog**: Added `concurrency` group to workflow — new branch pushes cancel any in-progress run for the same ref. Tag runs (`v*`) are never cancelled.
+- **Stale tag runs**: `v2.1.1` and `v2.1.2` tags pointed to commits still containing `macos-13`; this tag is the first on a clean commit without it.
+
 ## [2.1.2] - 2026-07-06
 ### Fixed
 - **Windows CI gofmt failure**: Windows git checks out files with CRLF by default; `gofmt` expects LF and flagged every `.go` file as unformatted. Added `.gitattributes` forcing `eol=lf` for `*.go`, `*.yml`, `*.sh`, and `Makefile`.
