@@ -2,6 +2,11 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.1.4] - 2026-07-06
+### Changed
+- **Merged Docker CI jobs**: `Build Docker Image` + `Publish Docker Image` consolidated into a single `Docker` job. Branch pushes build only (no push); tag pushes build and push to Docker Hub.
+- **Updated all GitHub Actions** to latest major versions: `actions/checkout` v4→v7, `actions/setup-go` v5→v6, `docker/setup-qemu-action` v3→v4, `docker/setup-buildx-action` v3→v4, `docker/login-action` v3→v4, `docker/build-push-action` v6→v7. Resolves Node.js 20 deprecation warnings.
+
 ## [2.1.3] - 2026-07-06
 ### Fixed
 - **CI run backlog**: Added `concurrency` group to workflow — new branch pushes cancel any in-progress run for the same ref. Tag runs (`v*`) are never cancelled.
