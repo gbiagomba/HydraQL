@@ -65,3 +65,8 @@ HydraQL_output-*.sarif
 
 # Claude Code local plugin data
 .greprules/
+
+# Go build artifacts
+dist/
+/hydraql
+/hydraql-go

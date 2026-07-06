@@ -2,6 +2,26 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.0.0] - 2026-07-06
+### Added
+- **Go rewrite**: HydraQL is now a single self-contained Go binary with no runtime dependencies.
+  - `cmd/hydraql/main.go` — flag parsing, worker pool, orchestration
+  - `internal/codeql/` — DB detection, query discovery, per-DB semaphore, per-query context timeout, progress ticker
+  - `internal/merge/` — CSV/JSON/SARIF merging and severity filtering
+  - `internal/report/` — ANSI color constants, ASCII chart
+- **Cross-compiled binaries** via `make go-build-all` (6 targets: darwin/linux/windows × amd64/arm64)
+- **`dist/` directory** — pre-built binaries land here; `make go-build` for native, `make go-build-all` for all platforms
+- All v1.8.0 Python features are present: `--query-timeout`, `--no-timeout`, progress ticker, timed-out count in summary
+
+### Changed
+- Python implementation moved to `legacy/hydraql.py` (still functional, `make run` uses it)
+- Install scripts (`install.sh`, `install.ps1`) moved to `legacy/`
+- Makefile split into Go targets (`go-build`, `go-build-all`, `go-test`, `go-vet`, `go-clean`) and Python legacy targets
+
+### Notes
+- Go binary is the recommended production path going forward
+- Python legacy version remains at v1.8.0 feature level
+
 ## [1.8.0] - 2026-07-06
 ### Added
 - **Per-query timeout** (`--query-timeout <seconds>`, default 600s): CodeQL queries that exceed the limit are killed, logged to `hydraql_failures.log` as `TIMEOUT after Xs: <query> on <lang>`, and skipped — the scan continues without them.

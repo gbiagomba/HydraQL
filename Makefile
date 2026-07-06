@@ -1,7 +1,15 @@
 # ===== HydraQL Makefile =====
+VERSION       ?= 2.0.0
 
+# ---- Go ----
+GO            ?= go
+GO_CMD        := ./cmd/hydraql
+LDFLAGS       := -ldflags="-s -w -X main.version=$(VERSION)"
+DIST          := dist
+
+# ---- Python (legacy) ----
 PY            ?= python3
-SCRIPT        ?= hydraql.py
+SCRIPT        ?= legacy/hydraql.py
 
 DB_ROOT       ?= ./cqlDB
 LANGS         ?= "javascript,typescript,python,java"
@@ -81,20 +89,63 @@ ifeq ($(NO_TIMEOUT),1)
   TIMEOUT_FLAG := --no-timeout
 endif
 
-.PHONY: help run run-sarif run-json run-high docker-build docker-run docker-shell clean
+.PHONY: help \
+        go-build go-build-all go-test go-vet go-clean \
+        run run-sarif run-json run-high \
+        docker-build docker-run docker-shell clean
 
 help:
-	@echo "HydraQL Makefile"
-	@echo " make run                        # run HydraQL locally"
+	@echo "HydraQL Makefile (v$(VERSION))"
+	@echo ""
+	@echo "=== Go (recommended) ==="
+	@echo " make go-build                   # build native binary → ./hydraql"
+	@echo " make go-build-all               # cross-compile all 6 targets → dist/"
+	@echo " make go-test                    # run Go tests"
+	@echo " make go-vet                     # run go vet"
+	@echo " make go-clean                   # remove dist/ and ./hydraql"
+	@echo ""
+	@echo "=== Python (legacy) ==="
+	@echo " make run                        # run Python HydraQL locally"
 	@echo " make run-sarif                  # SARIF output"
 	@echo " make run-json                   # JSON output"
 	@echo " make run-high                   # severity=HIGH (loose)"
 	@echo " make run QUERY_TIMEOUT=1800     # 30-min per-query timeout"
 	@echo " make run NO_TIMEOUT=1           # disable timeout"
+	@echo ""
+	@echo "=== Docker ==="
 	@echo " make docker-build               # build Docker image"
 	@echo " make docker-run                 # run in Docker"
 	@echo " make docker-shell               # shell inside container"
-	@echo " make clean                      # remove local artifacts"
+	@echo ""
+	@echo " make clean                      # remove all artifacts"
+
+# ============================================================
+# Go targets
+# ============================================================
+go-build:
+	$(GO) build $(LDFLAGS) -o hydraql $(GO_CMD)
+
+go-build-all: $(DIST)
+	GOOS=darwin  GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(DIST)/hydraql-darwin-amd64   $(GO_CMD)
+	GOOS=darwin  GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(DIST)/hydraql-darwin-arm64   $(GO_CMD)
+	GOOS=linux   GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(DIST)/hydraql-linux-amd64    $(GO_CMD)
+	GOOS=linux   GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(DIST)/hydraql-linux-arm64    $(GO_CMD)
+	GOOS=windows GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(DIST)/hydraql-windows-amd64.exe $(GO_CMD)
+	GOOS=windows GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(DIST)/hydraql-windows-arm64.exe $(GO_CMD)
+	@echo "Built all targets:"
+	@ls -lh $(DIST)/
+
+$(DIST):
+	mkdir -p $(DIST)
+
+go-test:
+	$(GO) test ./...
+
+go-vet:
+	$(GO) vet ./...
+
+go-clean:
+	rm -rf $(DIST) hydraql
 
 run:
 	$(PY) $(SCRIPT) \
@@ -168,7 +219,7 @@ docker-shell:
 	  -w /work \
 	  $(IMAGE) /bin/sh
 
-clean:
+clean: go-clean
 	rm -rf tmp_hydraql_output \
 	  HydraQL_output-*.csv \
 	  HydraQL_output-*.json \

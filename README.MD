@@ -35,10 +35,30 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
 - 📂 Outputs in CSV, JSON, or SARIF
 - ⏱️ Per-query timeout (`--query-timeout 600`) — never hang on a slow suite
 - 🔄 Real-time progress ticker: shows elapsed time every 5s so you know queries are alive
+- 🦫 **Single Go binary** — no Python runtime needed; ships as one file per platform
 
 ---
 
 ## Installation
+
+### Pre-built Binary (Go — recommended)
+```bash
+# Download the binary for your platform from the dist/ directory or a release:
+# darwin/amd64, darwin/arm64, linux/amd64, linux/arm64, windows/amd64, windows/arm64
+
+chmod +x hydraql-darwin-arm64
+./hydraql-darwin-arm64 --help
+```
+
+### Build from Source (Go)
+```bash
+# Prerequisites: Go 1.21+, CodeQL CLI in PATH
+git clone https://github.com/gbiagomba/hydraql.git
+cd hydraql
+
+make go-build         # native binary → ./hydraql
+make go-build-all     # all 6 platform binaries → dist/
+```
 
 ### Using Docker
 ```bash
@@ -57,12 +77,10 @@ docker run --rm \
   --fancy
 ```
 
-## From Source
+### Python (legacy)
 ```bash
 # Prerequisites: Python 3.7+, CodeQL CLI in PATH
-git clone https://github.com/yourorg/hydraql.git
-cd hydraql
-python3 hydraql.py --help
+python3 legacy/hydraql.py --help
 ```
 
 ---
