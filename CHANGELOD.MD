@@ -2,6 +2,14 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.1.1] - 2026-07-06
+### Fixed
+- **Docker build 404**: `codeql-linux-arm64.zip` does not exist in any CodeQL CLI release. Removed the arch-aware switch; always download `codeql-linux64.zip`. Docker image is `linux/amd64` only (CodeQL has no Linux arm64 binary).
+- **Docker arm64 platform removed** from `docker-build` and `publish-docker` CI jobs for the same reason.
+### Changed
+- **Go version**: `golang:1.21` → `golang:1.26-bookworm` in Dockerfile; `GO_VERSION` in workflow updated to `1.26`; `go.mod` updated to `go 1.26`.
+- **CodeQL CLI version**: default `CODEQL_VERSION` updated `2.17.6` → `2.25.6` (latest).
+
 ## [2.1.0] - 2026-07-06
 ### Added
 - **Short flags** via `pflag` (github.com/spf13/pflag): every flag now has a short single-character alias (`-d`/`--db-root`, `-l`/`--langs`, `-q`/`--query-dir`, `-F`/`--auto-finalize-db`, `-m`/`--allow-missing-db`, `-u`/`--unlock-cache`, `-c`/`--check-lock-process`, `-f`/`--fancy`, `-v`/`--verbose`, etc.). All existing long flags unchanged — fully backward compatible.

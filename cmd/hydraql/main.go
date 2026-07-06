@@ -20,7 +20,7 @@ import (
 	"github.com/gbiagomba/hydraql/internal/report"
 )
 
-const version = "2.1.0"
+const version = "2.1.1"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string

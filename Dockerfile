@@ -5,7 +5,7 @@
 # ============================================================
 
 # ---- builder ----
-FROM golang:1.21 AS builder
+FROM golang:1.26-bookworm AS builder
 
 ARG VERSION=dev
 WORKDIR /src
@@ -23,21 +23,15 @@ RUN CGO_ENABLED=0 go build \
 # ---- final ----
 FROM debian:bookworm-slim AS final
 
-ARG CODEQL_VERSION=2.17.6
+ARG CODEQL_VERSION=2.25.6
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl unzip ca-certificates procps \
  && rm -rf /var/lib/apt/lists/*
 
-# Install CodeQL CLI — arch-aware (amd64 or arm64)
-RUN ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in \
-      amd64) CODEQL_PKG="codeql-linux64.zip" ;; \
-      arm64) CODEQL_PKG="codeql-linux-arm64.zip" ;; \
-      *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
-    esac && \
-    curl -fsSL -o /tmp/codeql.zip \
-      "https://github.com/github/codeql-cli-binaries/releases/download/v${CODEQL_VERSION}/${CODEQL_PKG}" \
+# CodeQL CLI only ships a linux64 (x86_64) binary — no arm64 Linux package exists
+RUN curl -fsSL -o /tmp/codeql.zip \
+      "https://github.com/github/codeql-cli-binaries/releases/download/v${CODEQL_VERSION}/codeql-linux64.zip" \
  && mkdir -p /opt \
  && unzip -q /tmp/codeql.zip -d /opt \
  && mv /opt/codeql /opt/codeql-${CODEQL_VERSION} \
