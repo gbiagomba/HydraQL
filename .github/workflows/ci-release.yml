@@ -17,15 +17,11 @@ env:
 
 jobs:
   # ----------------------------------------------------------------
-  # Build and test on all major platforms
+  # Build and test
   # ----------------------------------------------------------------
   build-test:
-    name: Build and Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-13, macos-14, windows-latest]
+    name: Build and Test
+    runs-on: macos-latest
 
     steps:
       - name: Checkout code

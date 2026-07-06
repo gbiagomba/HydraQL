@@ -74,15 +74,15 @@ func IsDBEmpty(dbDir string) bool {
 }
 
 type DetectConfig struct {
-	AutoFinalizeDB  bool
-	AutoInitDB      bool
+	AutoFinalizeDB   bool
+	AutoInitDB       bool
 	SourceRoot       string
-	AllowMissingDB  bool
+	AllowMissingDB   bool
 	ForceScamUnready bool
-	DryRun          bool
-	Verbose         bool
-	Fancy           bool
-	UnlockCache     bool
+	DryRun           bool
+	Verbose          bool
+	Fancy            bool
+	UnlockCache      bool
 	CheckLockProcess bool
 	KillLockProcess  bool
 }

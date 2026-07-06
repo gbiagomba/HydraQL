@@ -39,4 +39,3 @@ func InitDB(dbDir, lang, sourceRoot string, verbose bool) bool {
 	}
 	return true
 }
-
