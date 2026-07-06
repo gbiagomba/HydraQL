@@ -2,6 +2,10 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.1.2] - 2026-07-06
+### Fixed
+- **Windows CI gofmt failure**: Windows git checks out files with CRLF by default; `gofmt` expects LF and flagged every `.go` file as unformatted. Added `.gitattributes` forcing `eol=lf` for `*.go`, `*.yml`, `*.sh`, and `Makefile`.
+
 ## [2.1.1] - 2026-07-06
 ### Fixed
 - **Docker build 404**: `codeql-linux-arm64.zip` does not exist in any CodeQL CLI release. Removed the arch-aware switch; always download `codeql-linux64.zip`. Docker image is `linux/amd64` only (CodeQL has no Linux arm64 binary).
