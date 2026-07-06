@@ -17,23 +17,22 @@ env:
 
 jobs:
   # ----------------------------------------------------------------
-  # Build and test on all major platforms / architectures
+  # Build and test — all OS × arch combinations
+  # Windows arm64 is cross-compiled from the amd64 runner (no native runner exists)
   # ----------------------------------------------------------------
   build-test:
-    name: Build and Test (${{ matrix.os }} / ${{ matrix.arch }})
+    name: Build and Test (${{ matrix.goos }} / ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            arch: amd64
-          - os: windows-latest
-            arch: amd64
-          - os: macos-latest
-            arch: arm64
-          - os: macos-13
-            arch: amd64
+          - { os: ubuntu-latest,    arch: amd64, goos: linux,   goarch: amd64, run_tests: true  }
+          - { os: ubuntu-24.04-arm, arch: arm64, goos: linux,   goarch: arm64, run_tests: true  }
+          - { os: macos-13,         arch: amd64, goos: darwin,  goarch: amd64, run_tests: true  }
+          - { os: macos-latest,     arch: arm64, goos: darwin,  goarch: arm64, run_tests: true  }
+          - { os: windows-latest,   arch: amd64, goos: windows, goarch: amd64, run_tests: true  }
+          - { os: windows-latest,   arch: arm64, goos: windows, goarch: arm64, run_tests: false }
 
     steps:
       - name: Checkout code
@@ -55,12 +54,22 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
 
       - name: Build
         run: go build ./...
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
 
       - name: Test
+        if: matrix.run_tests
         run: go test ./...
+        env:
+          GOARCH: ${{ matrix.goarch }}
 
   # ----------------------------------------------------------------
   # Cross-compile all 6 targets and publish a GitHub Release on tags
