@@ -1,0 +1,10 @@
+# Force LF line endings for Go source files.
+# Windows git defaults to CRLF on checkout; gofmt always produces LF,
+# so without this every .go file fails the gofmt check on Windows runners.
+*.go    text eol=lf
+
+# Keep YAML/shell/Makefile as LF too
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+Makefile text eol=lf

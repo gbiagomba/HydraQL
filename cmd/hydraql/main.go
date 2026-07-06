@@ -20,13 +20,13 @@ import (
 	"github.com/gbiagomba/hydraql/internal/report"
 )
 
-const version = "2.1.0"
+const version = "2.1.4"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string
 
-func (s *stringSliceFlag) String() string     { return strings.Join(*s, ",") }
-func (s *stringSliceFlag) Type() string       { return "stringSlice" }
+func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
+func (s *stringSliceFlag) Type() string   { return "stringSlice" }
 func (s *stringSliceFlag) Set(value string) error {
 	for _, v := range strings.Split(value, ",") {
 		if v = strings.TrimSpace(v); v != "" {
@@ -122,7 +122,7 @@ func main() {
 	detectCfg := &codeql.DetectConfig{
 		AutoFinalizeDB:   *autoFinalizeDB,
 		AutoInitDB:       *autoInitDB,
-		SourceRoot:        *sourceRoot,
+		SourceRoot:       *sourceRoot,
 		AllowMissingDB:   *allowMissingDB,
 		ForceScamUnready: *forceScamUnready,
 		DryRun:           *dryRun,

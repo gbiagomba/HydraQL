@@ -5,7 +5,6 @@ import (
 	"os"
 )
 
-
 func CountSARIF(path, severityFilter string, strict bool) int {
 	data, err := os.ReadFile(path)
 	if err != nil {
