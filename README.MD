@@ -227,8 +227,8 @@ On a `v*` tag push:
 
 To publish a release:
 ```bash
-git tag -a v2.1.5 -m "Release v2.1.5"
-git push origin v2.1.5
+git tag -a v2.1.6 -m "Release v2.1.6"
+git push origin v2.1.6
 ```
 
 Docker Hub publishing requires `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets set in the repository settings.
