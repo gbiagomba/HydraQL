@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gbiagomba/hydraql/internal/report"
+	"github.com/gbiagomba/hydraql/v2/internal/report"
 )
 
 var lockPIDRe = regexp.MustCompile(`(?i)pid\s*=\s*(\d+)|^(\d+)$`)

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gbiagomba/hydraql/internal/report"
+	"github.com/gbiagomba/hydraql/v2/internal/report"
 )
 
 var excludeDirs = map[string]bool{

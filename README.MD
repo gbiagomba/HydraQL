@@ -71,9 +71,13 @@ mv hydraql-darwin-arm64 hydraql && ./hydraql --help
 
 ### Build from Source
 
-**Prerequisites:** Go 1.21+, CodeQL CLI in `$PATH`
+**Prerequisites:** Go 1.26+, CodeQL CLI in `$PATH`
 
 ```bash
+# One-liner global install (Go 1.26+)
+go install github.com/gbiagomba/hydraql/v2/cmd/hydraql@latest
+
+# Or clone and build manually
 git clone https://github.com/gbiagomba/hydraql.git
 cd hydraql
 

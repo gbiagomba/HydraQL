@@ -1,4 +1,4 @@
-module github.com/gbiagomba/hydraql
+module github.com/gbiagomba/hydraql/v2
 
 go 1.26
 

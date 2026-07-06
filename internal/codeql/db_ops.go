@@ -5,7 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/gbiagomba/hydraql/internal/report"
+	"github.com/gbiagomba/hydraql/v2/internal/report"
 )
 
 func FinalizeDB(dbDir string, verbose bool) bool {
