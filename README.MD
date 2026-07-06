@@ -15,7 +15,8 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
 ## Table of Contents
 - [Features](#features)
 - [Installation](#installation)
-  - [Pre-built Binary](#pre-built-binary-recommended)
+  - [go install](#go-install-recommended)
+  - [Pre-built Binary](#pre-built-binary)
   - [Build from Source](#build-from-source)
   - [Docker](#docker)
   - [Python Legacy](#python-legacy)
@@ -47,7 +48,25 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
 
 ## Installation
 
-### Pre-built Binary (recommended)
+### `go install` (recommended)
+
+**Prerequisites:** Go 1.26+, CodeQL CLI in `$PATH`
+
+```bash
+go install github.com/gbiagomba/hydraql/v2/cmd/hydraql@latest
+```
+
+The binary lands in `$GOPATH/bin` (usually `$HOME/go/bin`). Make sure that directory is in your `$PATH`:
+
+```bash
+# Add to ~/.zshrc or ~/.bashrc if not already present
+export PATH="$HOME/go/bin:$PATH"
+
+# Verify
+hydraql --version
+```
+
+### Pre-built Binary
 
 Download the binary for your platform from [Releases](https://github.com/gbiagomba/hydraql/releases):
 
@@ -61,23 +80,17 @@ Download the binary for your platform from [Releases](https://github.com/gbiagom
 | Windows ARM64  | `hydraql-windows-arm64.exe`    |
 
 ```bash
-# macOS / Linux
-chmod +x hydraql-darwin-arm64
-./hydraql-darwin-arm64 --version
+# macOS / Linux — download, make executable, move to PATH
+curl -L https://github.com/gbiagomba/HydraQL/releases/latest/download/hydraql-darwin-arm64 \
+  -o /usr/local/bin/hydraql && chmod +x /usr/local/bin/hydraql
 
-# or rename for convenience
-mv hydraql-darwin-arm64 hydraql && ./hydraql --help
+# Verify
+hydraql --version
 ```
 
 ### Build from Source
 
-**Prerequisites:** Go 1.26+, CodeQL CLI in `$PATH`
-
 ```bash
-# One-liner global install (Go 1.26+)
-go install github.com/gbiagomba/hydraql/v2/cmd/hydraql@latest
-
-# Or clone and build manually
 git clone https://github.com/gbiagomba/hydraql.git
 cd hydraql
 
@@ -94,7 +107,7 @@ make go-vet         # run go vet
 docker build -t hydraql:latest .
 
 # With a specific CodeQL CLI version
-docker build --build-arg CODEQL_VERSION=2.17.6 -t hydraql:latest .
+docker build --build-arg CODEQL_VERSION=2.25.6 -t hydraql:latest .
 
 # Run
 docker run --rm \
@@ -204,18 +217,18 @@ docker run --rm \
 ## CI / Release
 
 On every push, GitHub Actions runs:
-- `go vet`, `go build`, `go test` on ubuntu, macos-13, macos-14, and windows
+- `go vet`, `go build`, `go test` on 5 runners: linux/amd64, linux/arm64, darwin/arm64, windows/amd64, windows/arm64
 
 On a `v*` tag push:
 - Cross-compiles all 6 binaries via `make build-all`
 - Generates SHA-256 checksums for each binary
 - Publishes a GitHub Release with binaries and checksums
-- Builds and pushes a multi-arch Docker image (`linux/amd64`, `linux/arm64`)
+- Builds and pushes a Docker image (`linux/amd64`) to Docker Hub
 
 To publish a release:
 ```bash
-git tag -a v2.1.0 -m "Release v2.1.0"
-git push origin v2.1.0
+git tag -a v2.1.5 -m "Release v2.1.5"
+git push origin v2.1.5
 ```
 
 Docker Hub publishing requires `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets set in the repository settings.
