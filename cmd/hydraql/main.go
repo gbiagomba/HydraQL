@@ -15,12 +15,12 @@ import (
 
 	pflag "github.com/spf13/pflag"
 
-	"github.com/gbiagomba/hydraql/internal/codeql"
-	"github.com/gbiagomba/hydraql/internal/merge"
-	"github.com/gbiagomba/hydraql/internal/report"
+	"github.com/gbiagomba/hydraql/v2/internal/codeql"
+	"github.com/gbiagomba/hydraql/v2/internal/merge"
+	"github.com/gbiagomba/hydraql/v2/internal/report"
 )
 
-const version = "2.1.4"
+const version = "2.1.6"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string

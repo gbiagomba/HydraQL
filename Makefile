@@ -1,5 +1,5 @@
 # ===== HydraQL Makefile =====
-VERSION       ?= 2.1.4
+VERSION       ?= 2.1.6
 
 # ---- Go ----
 GO            ?= go
@@ -37,7 +37,7 @@ NO_TIMEOUT        ?= 0
 
 # Docker
 IMAGE         ?= hydraql:latest
-CODEQL_VERSION?= 2.17.6
+CODEQL_VERSION?= 2.25.6
 
 # Flags
 ifeq ($(FANCY),1)

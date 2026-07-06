@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gbiagomba/hydraql/internal/merge"
-	"github.com/gbiagomba/hydraql/internal/report"
+	"github.com/gbiagomba/hydraql/v2/internal/merge"
+	"github.com/gbiagomba/hydraql/v2/internal/report"
 )
 
 // Per-DB serialization to prevent IMB cache lock races.

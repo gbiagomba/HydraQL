@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gbiagomba/hydraql/internal/report"
+	"github.com/gbiagomba/hydraql/v2/internal/report"
 )
 
 var importLangRe = regexp.MustCompile(`(?im)^\s*import\s+(java|javascript|python|cpp|swift|ruby|kotlin|typescript)\b`)
