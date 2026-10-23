@@ -153,20 +153,35 @@ func TestDBFinalized(t *testing.T) {
 }
 
 // A multi-language cluster gets a directory per language even when a language
-// has no code. CodeQL warns and leaves the directory empty; that must not look
-// like a finalize failure, or every multi-language build would need
-// --allow-missing-db.
-func TestDetectTargetsSkipsEmptyClusterLanguage(t *testing.T) {
+// has no code: `database create --db-cluster --language=javascript,python`
+// against a JavaScript-only tree warns, exits 0, and leaves behind a python
+// directory that has codeql-database.yml but no db-* subdirectory. That is not
+// a scannable database, and treating it as one made every multi-language build
+// depend on --allow-missing-db.
+//
+// Note the deliberate absence of AutoFinalizeDB: enabling it would make this
+// test shell out to the real codeql binary, which is not installed on CI.
+func TestDetectTargetsSkipsUnextractedClusterLanguage(t *testing.T) {
 	root := t.TempDir()
 	writeDB(t, filepath.Join(root, "jsonly", "javascript"), "javascript")
-	if err := os.MkdirAll(filepath.Join(root, "jsonly", "python"), 0o755); err != nil {
+
+	// The shape CodeQL actually leaves behind: metadata, but nothing extracted.
+	pythonDir := filepath.Join(root, "jsonly", "python")
+	if err := os.MkdirAll(pythonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pythonDir, "codeql-database.yml"),
+		[]byte("primaryLanguage: python\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg := &DetectConfig{ForceScamUnready: true, AutoFinalizeDB: true}
+	// ForceScamUnready defeats the emptiness heuristic, so only the missing
+	// db-* subdirectory can keep this directory out of the target list. No
+	// AllowMissingDB either: the run must succeed on its own.
+	cfg := &DetectConfig{ForceScamUnready: true}
 	targets, ok := DetectTargets([]string{"javascript", "python"}, root, cfg)
 	if !ok {
-		t.Fatal("an empty cluster language must not fail the run without --allow-missing-db")
+		t.Fatal("an unextracted cluster language must not fail the run without --allow-missing-db")
 	}
 	if len(targets) != 1 || targets[0].Label() != "jsonly/javascript" {
 		t.Fatalf("targets = %+v, want only jsonly/javascript", targets)

@@ -3,6 +3,7 @@ package codeql
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -28,7 +29,13 @@ func fixture(t *testing.T) (buildRoot, deepTarget string) {
 	if err := os.MkdirAll(deepTarget, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Windows only permits unprivileged symlink creation with Developer Mode
+	// on. GitHub's runners have it, but a contributor's machine may not, and a
+	// test that cannot create its own fixture proves nothing either way.
 	if err := os.Symlink(deepTarget, filepath.Join(buildRoot, "c")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("cannot create symlinks on this host: %v", err)
+		}
 		t.Fatal(err)
 	}
 
