@@ -21,6 +21,7 @@ All notable changes to **HydraQL** will be documented in this file.
 - Progress ticker output no longer races the next log line; stopping the ticker waits for the line to be cleared.
 - `FinalizeDB` also treats "already been finalized" as success, matching the other phrasing CodeQL uses.
 - **A multi-language cluster no longer needs `--allow-missing-db`.** `database create --db-cluster --language=javascript,python` against a JavaScript-only tree warns ("CodeQL detected code written in JavaScript/TypeScript ... but not any written in Python"), exits 0, and leaves an empty `python/` directory. Detection counted that as a finalize failure and aborted the run. A cluster language directory with no `db-*` subdir is now skipped quietly.
+- **A missing Docker Hub credential failed the whole tag run.** The login step ran unconditionally on tags, so without `DOCKER_USERNAME` / `DOCKER_PASSWORD` it died on "Username and password required" and marked the run red even though the GitHub Release had published correctly. Docker Hub publishing is now detected and skipped with a notice annotation, and the image is still built and verified either way.
 - **GitHub Releases had no release notes.** The CI step read the changelog under its old filename, matched `## [v2.2.0]` against headings written as `## [2.2.0]`, and used an awk range whose start line also matched its end pattern, so extraction always produced nothing and fell back to the raw tag message. All three are fixed.
 
 ### Changed
