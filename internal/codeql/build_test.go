@@ -1,6 +1,7 @@
 package codeql
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -509,5 +510,87 @@ func TestCreateArgsShapePerGroupCount(t *testing.T) {
 		if !strings.Contains(joined, filepath.Join("cqlDB_src", lang)) {
 			t.Errorf("group %d should target cqlDB_src/%s: %s", i, lang, joined)
 		}
+	}
+}
+
+// A per-language create targets <DBPath>/<lang>, so <DBPath> itself must exist
+// first. CodeQL refuses with "Cannot create database at ... because ... does
+// not exist", which is how every language in a multi-group build once failed.
+func TestBuildOneCreatesDBRootForPerLanguageBuilds(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(root, "cqlDB_src")
+	p := Project{Name: "src", SourceRoot: src, DBPath: dbPath}
+	cfg := &BuildConfig{
+		Langs: []string{"javascript", "java"},
+		CreateOptions: CreateOptions{
+			PerLang: map[string][]string{"java": {"./build.sh build-android"}},
+		},
+		// DryRun would return before the directory work; a real run needs
+		// codeql, so this asserts on the directory alone by letting the
+		// creates fail afterwards.
+		BuildTimeout: 1,
+	}
+
+	if len(groupLangs(cfg.Langs, cfg.CreateOptions)) < 2 {
+		t.Fatal("fixture should produce more than one build group")
+	}
+
+	_ = buildOne(context.Background(), p, cfg)
+
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("db-root %s was not created: %v", dbPath, err)
+	}
+	if !info.IsDir() {
+		t.Errorf("%s is not a directory", dbPath)
+	}
+}
+
+// A single group is a cluster create, which creates its own root, so only the
+// parent needs to exist.
+func TestBuildOneCreatesParentForClusterBuilds(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(root, "nested", "cqlDB_src")
+	p := Project{Name: "src", SourceRoot: src, DBPath: dbPath}
+	cfg := &BuildConfig{Langs: []string{"javascript"}, BuildTimeout: 1}
+
+	_ = buildOne(context.Background(), p, cfg)
+
+	if _, err := os.Stat(filepath.Dir(dbPath)); err != nil {
+		t.Fatalf("parent of db-root was not created: %v", err)
+	}
+}
+
+func TestBuildOutcomeCauseAttribution(t *testing.T) {
+	// Nothing created at all must not be reported as a build-command problem.
+	failed := BuildOutcome{
+		Project:          Project{Name: "src"},
+		Empty:            []string{"javascript"},
+		AllCreatesFailed: true,
+	}
+	if failed.OK() {
+		t.Error("OK() should be false with no usable languages")
+	}
+
+	partial := BuildOutcome{
+		Project: Project{Name: "src"},
+		Usable:  []string{"javascript"},
+		Empty:   []string{"cpp"},
+	}
+	if !partial.OK() {
+		t.Error("OK() should be true when at least one language is usable")
+	}
+	if partial.AllCreatesFailed {
+		t.Error("a partial build did not have all creates fail")
 	}
 }

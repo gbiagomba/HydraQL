@@ -478,7 +478,11 @@ func BuildDatabases(ctx context.Context, projects []Project, cfg *BuildConfig) [
 type BuildOutcome struct {
 	Project Project
 	Usable  []string // languages with a scannable database
-	Empty   []string // languages that extracted nothing
+	Empty   []string // languages without a scannable database
+
+	// AllCreatesFailed distinguishes "codeql never ran successfully" from
+	// "it ran but the build produced no code", which need different advice.
+	AllCreatesFailed bool
 }
 
 // OK reports whether at least one language is scannable.
@@ -502,10 +506,15 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) BuildOutcome {
 		return BuildOutcome{Project: p}
 	}
 
-	// `codeql database create` refuses to create its target's parent, so the
-	// db-root has to exist first.
-	if err := os.MkdirAll(filepath.Dir(p.DBPath), 0o755); err != nil {
-		fmt.Printf("%s✖ Cannot create %s: %v%s\n", report.Red, filepath.Dir(p.DBPath), err, report.Reset)
+	// `codeql database create` refuses to create its target's parent directory.
+	// A cluster create targets p.DBPath, so only its parent must exist; a
+	// per-language create targets p.DBPath/<lang>, so p.DBPath itself must.
+	needed := filepath.Dir(p.DBPath)
+	if len(groups) > 1 {
+		needed = p.DBPath
+	}
+	if err := os.MkdirAll(needed, 0o755); err != nil {
+		fmt.Printf("%s✖ Cannot create %s: %v%s\n", report.Red, needed, err, report.Reset)
 		return BuildOutcome{Project: p}
 	}
 	if _, err := os.Stat(p.DBPath); err == nil {
@@ -519,8 +528,10 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) BuildOutcome {
 	}
 
 	failures := 0
+	creates := 0
 	for _, g := range groups {
 		for _, args := range createArgs(p, g, groups, cfg) {
+			creates++
 			if !runCreate(ctx, p, g, args, cfg) {
 				failures++
 			}
@@ -538,6 +549,7 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) BuildOutcome {
 	finalizeCluster(p, cfg)
 
 	out := classify(p, cfg)
+	out.AllCreatesFailed = creates > 0 && failures == creates
 	reportOutcome(out, cfg)
 	return out
 }
@@ -650,12 +662,20 @@ func reportOutcome(out BuildOutcome, cfg *BuildConfig) {
 		fmt.Printf("   ✅ %s: %s ready\n", out.Project.Name, strings.Join(out.Usable, ", "))
 	}
 	if len(out.Empty) > 0 {
-		fmt.Printf("   %s⚠️  %s: %s extracted no code%s\n",
-			report.Yellow, out.Project.Name, strings.Join(out.Empty, ", "), report.Reset)
-		if !cfg.CreateOptions.HasPerLang() && len(cfg.CreateOptions.BuildCommands) == 0 {
-			fmt.Printf("      A compiled language needs --build-command naming a command that invokes its compiler.\n")
+		if out.AllCreatesFailed {
+			// Blaming the build command here would send the reader down the
+			// wrong path: codeql itself never got as far as extracting.
+			fmt.Printf("   %s✖ %s: no database was created for %s%s\n",
+				report.Red, out.Project.Name, strings.Join(out.Empty, ", "), report.Reset)
+			fmt.Printf("      Every codeql database create call failed; see the error above and hydraql_failures.log.\n")
 		} else {
-			fmt.Printf("      Check that the build command actually compiles those languages; CodeQL only sees a real build.\n")
+			fmt.Printf("   %s⚠️  %s: %s extracted no code%s\n",
+				report.Yellow, out.Project.Name, strings.Join(out.Empty, ", "), report.Reset)
+			if !cfg.CreateOptions.HasPerLang() && len(cfg.CreateOptions.BuildCommands) == 0 {
+				fmt.Printf("      A compiled language needs --build-command naming a command that invokes its compiler.\n")
+			} else {
+				fmt.Printf("      Check that the build command actually compiles those languages; CodeQL only sees a real build.\n")
+			}
 		}
 	}
 	fmt.Printf("   Built %d of %d requested language(s) for %s\n",
@@ -671,7 +691,9 @@ func finalizeCluster(p Project, cfg *BuildConfig) bool {
 	}
 	dirs := clusterLangDirs(p.DBPath)
 	if len(dirs) == 0 {
-		fmt.Printf("%s⚠️  No language databases found under %s%s\n", report.Yellow, p.DBPath, report.Reset)
+		if cfg.Verbose {
+			fmt.Printf("   • Nothing to finalize under %s\n", p.DBPath)
+		}
 		return false
 	}
 	ok := true

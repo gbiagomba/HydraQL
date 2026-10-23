@@ -23,7 +23,7 @@ import (
 
 // version is overridable at link time via -X main.version (see Makefile LDFLAGS),
 // so it must stay a var: -X cannot patch a const.
-var version = "2.7.0"
+var version = "2.7.1"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string

@@ -2,6 +2,11 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.7.1] - 2026-10-23
+### Fixed
+- **Per-language builds failed for every language.** A cluster create targets the db-root and makes that directory itself, but a per-language create targets `<db-root>/<lang>` and requires the db-root to already exist. Only the db-root's *parent* was being created, so each language died on `A fatal error occurred: Cannot create database at .../cqlDB_src/javascript because .../cqlDB_src does not exist`. Every multi-group build was affected, which is every use of a language-bound `--build-command`. The directory that must exist is now chosen by the invocation shape.
+- **A failed create was reported as a build-command problem.** With no database created at all, the summary still said "extracted no code" and advised checking that the build command compiles, which points at the wrong cause. A run where every create failed now says so and refers to the error and `hydraql_failures.log`. The "No language databases found" warning during salvage is also demoted to verbose, since it is redundant when nothing was created.
+
 ## [2.7.0] - 2026-10-23
 ### Fixed
 - **A partially built cluster is no longer thrown away.** CodeQL finalizes a `--db-cluster` as one step at the end, so a single language failing there leaves *every* language unfinalized and without its `db-*` directory, even languages whose extraction completed. HydraQL returned on the non-zero exit without finalizing anything and exited with "No databases were built successfully".
