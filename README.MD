@@ -303,6 +303,7 @@ All flags support both a short form (`-X`) and the traditional long form (`--fla
 |       | `--build-command`       | _(none)_  | Build command for compiled languages, as codeql `--command` (repeat for several) |
 |       | `--build-mode`          | _(none)_  | CodeQL build mode: `none`, `autobuild`, or `manual`    |
 |       | `--build-timeout`       | `0`       | Per-database creation timeout in seconds (`0` = none)  |
+|       | `--external`            | _(none)_  | External predicate data as `predicate=file.csv` (repeat for several) |
 | `-B`  | `--build-threads`       | `1`       | Concurrent database builds                             |
 | `-T`  | `--query-timeout`       | `600`     | Per-query timeout in seconds (`0` = no timeout)        |
 | `-N`  | `--no-timeout`          | `false`   | Disable per-query timeout entirely                     |
@@ -367,6 +368,34 @@ one and gives reshaped CSV. The run header always states which.
 
 Query `@kind` decides what each pass runs: graph formats get `@kind graph`
 queries, csv/json/sarif get `problem` and `path-problem` queries.
+
+Graph writers treat their output as a directory, so each query's files are kept
+under their own subdirectory with CodeQL's rule namespacing intact:
+
+```bash
+hydraql -d ./cqlDB -l javascript -q ~/Git/codeql/javascript/ql/lib -o dot \
+  --external "selectedSourceFile=./selected.csv"
+```
+```
+Raw CodeQL output in HydraQL_output-20261023162604-dot (1 file(s))
+  printAst_proj_javascript/js/print-ast.dot
+```
+
+#### External predicates
+
+A query that declares an extensional predicate cannot evaluate without data for
+it. `printAst.ql` declares `external string selectedSourceFile()` and fails with
+`The query depends on an extensional predicate selectedSourceFile which has not
+been defined`. Supply it with `--external`, which maps onto CodeQL's own
+`--external`:
+
+```bash
+hydraql ... --external "selectedSourceFile=./selected.csv"
+```
+
+Repeat the flag for several predicates. The pair is validated before any
+analysis runs, so a malformed value, a missing file, or a directory given in
+place of a CSV is reported immediately rather than once per query.
 
 Three values CodeQL's `--help` still advertises are refused before any work
 starts, because the CLI itself rejects them at run time:
@@ -463,8 +492,8 @@ On a `v*` tag push:
 
 To publish a release:
 ```bash
-git tag -a v2.5.0 -m "Release v2.5.0"
-git push origin v2.5.0
+git tag -a v2.6.0 -m "Release v2.6.0"
+git push origin v2.6.0
 ```
 
 Docker Hub publishing requires `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets set in the repository settings.

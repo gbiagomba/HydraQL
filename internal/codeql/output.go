@@ -50,12 +50,12 @@ var sarifSpellings = map[string]bool{
 }
 
 // graphFormats are CodeQL's graph writers. They describe `@kind graph` queries
-// rather than alerts, so there is nothing to merge: the per-query files are
-// kept as CodeQL wrote them.
-var graphFormats = map[string]string{
-	"graphtext": "txt",
-	"dot":       "dot",
-	"dgml":      "dgml",
+// rather than alerts, so there is nothing to merge: whatever CodeQL writes is
+// kept as-is. Each writes a directory of files rather than a single file.
+var graphFormats = map[string]bool{
+	"graphtext": true,
+	"dot":       true,
+	"dgml":      true,
 }
 
 // removedFormats are values CodeQL's --help still advertises but the CLI
@@ -68,10 +68,7 @@ var removedFormats = map[string]string{
 }
 
 // IsGraphFormat reports whether a CodeQL format consumes `@kind graph` queries.
-func IsGraphFormat(codeqlFormat string) bool {
-	_, ok := graphFormats[codeqlFormat]
-	return ok
-}
+func IsGraphFormat(codeqlFormat string) bool { return graphFormats[codeqlFormat] }
 
 // CodeQLFormat maps a HydraQL output format to the value CodeQL's
 // `database analyze --format` accepts. CodeQL has no "sarif" or "json"
@@ -83,16 +80,25 @@ func CodeQLFormat(outputFormat string) string {
 	return outputFormat
 }
 
-// TempExt is the file extension for a pass's per-query output.
+// TempExt is the file extension for a pass's per-query output, or "" when the
+// pass writes a directory instead of a file.
+//
+// CodeQL's graph writers treat --output as a directory and fill it with one
+// file per graph, namespaced by rule id (for example js/print-ast.dot), so
+// there is no single filename to name.
 func TempExt(codeqlFormat string) string {
-	if codeqlFormat == "csv" {
+	switch {
+	case codeqlFormat == "csv":
 		return "csv"
+	case IsGraphFormat(codeqlFormat):
+		return ""
+	default:
+		return "sarif"
 	}
-	if ext, ok := graphFormats[codeqlFormat]; ok {
-		return ext
-	}
-	return "sarif"
 }
+
+// WritesDirectory reports whether a pass's --output is a directory.
+func WritesDirectory(codeqlFormat string) bool { return TempExt(codeqlFormat) == "" }
 
 // SupportedFormats lists everything --output-format accepts, for help text and
 // error messages.
@@ -160,7 +166,7 @@ func NewOutputPlan(spec string) (OutputPlan, error) {
 			// understands the 2.1.0 schema it produces.
 			add(OutputTarget{Name: "sarif", CodeQLFormat: tok, Mode: OutputMerged})
 
-		case graphFormats[tok] != "":
+		case graphFormats[tok]:
 			add(OutputTarget{Name: tok, CodeQLFormat: tok, Mode: OutputRaw})
 
 		default:

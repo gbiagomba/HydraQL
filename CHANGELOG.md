@@ -2,6 +2,17 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.6.0] - 2026-10-23
+### Added
+- **`--external predicate=file.csv`**, forwarded to `codeql database analyze --external`. Repeat it for several predicates. A query declaring an extensional predicate cannot evaluate without one: `printAst.ql` fails with `The query depends on an extensional predicate selectedSourceFile which has not been defined`. The value is validated before any analysis starts, so a malformed pair, a missing file, or a directory given in place of a CSV is reported in a second rather than once per query. A leading `~` is expanded.
+
+### Fixed
+- **Graph formats wrote nothing.** `codeql database analyze --format=dot` treats `--output` as a *directory* and fills it with one file per graph, namespaced by rule id (`js/print-ast.dot`). HydraQL named a `.dot` file instead, so collecting the output failed with `read tmp_hydraql_output/printAst_proj_javascript.dot: is a directory` and no graph output was ever produced. Graph passes now name a directory, and the collection step copies whole trees so the rule namespacing survives and separate queries cannot collide.
+
+  Verified end to end: `-o dot --external selectedSourceFile=<file>` now produces `HydraQL_output-<timestamp>-dot/printAst_proj_javascript/js/print-ast.dot`, byte-for-byte identical to a direct `codeql database analyze` invocation with the same arguments.
+- Graph passes no longer attempt to count findings, since graph output describes a query's structure rather than alerts.
+- `cleanTmp` removes the temp directory recursively; a graph pass leaves directories behind, not just files.
+
 ## [2.5.0] - 2026-10-23
 ### Changed
 - **`-o all` is now a single CodeQL pass.** CodeQL runs once with `--format=sarif-latest`, and the CSV and JSON reports are reshaped from that SARIF instead of costing their own analysis. In 2.4.0 this took two passes.

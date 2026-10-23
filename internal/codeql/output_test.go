@@ -155,13 +155,28 @@ func TestOutputPlanDescribe(t *testing.T) {
 	}
 }
 
+// CodeQL's graph writers treat --output as a directory and fill it with one
+// file per graph, so those passes have no single filename to name.
 func TestTempExtPerPass(t *testing.T) {
 	for in, want := range map[string]string{
 		"csv": "csv", "sarif-latest": "sarif", "sarifv2.1.0": "sarif",
-		"dot": "dot", "dgml": "dgml", "graphtext": "txt",
+		"dot": "", "dgml": "", "graphtext": "",
 	} {
 		if got := TempExt(in); got != want {
 			t.Errorf("TempExt(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestWritesDirectory(t *testing.T) {
+	for _, f := range []string{"dot", "dgml", "graphtext"} {
+		if !WritesDirectory(f) {
+			t.Errorf("WritesDirectory(%q) = false, want true", f)
+		}
+	}
+	for _, f := range []string{"csv", "sarif-latest", "sarifv2.1.0"} {
+		if WritesDirectory(f) {
+			t.Errorf("WritesDirectory(%q) = true, want false", f)
 		}
 	}
 }

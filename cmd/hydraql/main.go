@@ -23,7 +23,7 @@ import (
 
 // version is overridable at link time via -X main.version (see Makefile LDFLAGS),
 // so it must stay a var: -X cannot patch a const.
-var version = "2.5.0"
+var version = "2.6.0"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string
@@ -45,6 +45,7 @@ func main() {
 	var sourceDirs stringSliceFlag
 	var excludes stringSliceFlag
 	var buildCommands []string
+	var externals []string
 
 	langs := pflag.StringP("langs", "l", "java,javascript,typescript,python",
 		"Comma-separated languages to scan")
@@ -103,6 +104,9 @@ func main() {
 	queryTimeout := pflag.IntP("query-timeout", "T", 600, "Per-query timeout in seconds (0 = no timeout)")
 	noTimeout := pflag.BoolP("no-timeout", "N", false, "Disable per-query timeout entirely")
 
+	pflag.StringArrayVar(&externals, "external", nil,
+		"External predicate data as predicate=file.csv, for queries that declare one (repeat for several)")
+
 	showVersion := pflag.BoolP("version", "V", false, "Print version and exit")
 
 	pflag.Parse()
@@ -131,6 +135,12 @@ func main() {
 	}
 
 	outputPlan, err := codeql.NewOutputPlan(*outputFormat)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	externalArgs, err := codeql.ParseExternals(externals)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
@@ -311,6 +321,7 @@ func main() {
 		KillLockProcess:  *killLockProc,
 		SeverityFilter:   *severityFilter,
 		StrictSeverity:   *strictSeverity,
+		Externals:        externalArgs,
 	}
 
 	codeqlFormats := outputPlan.CodeQLFormats()
@@ -485,12 +496,6 @@ func installPacks(fancy, verbose bool) {
 }
 
 func cleanTmp(dir string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		_ = os.Remove(filepath.Join(dir, e.Name()))
-	}
-	_ = os.Remove(dir)
+	// A graph pass leaves directories behind, not just files.
+	_ = os.RemoveAll(dir)
 }

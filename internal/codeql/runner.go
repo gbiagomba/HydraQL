@@ -80,6 +80,11 @@ type RunConfig struct {
 	KillLockProcess  bool
 	SeverityFilter   string
 	StrictSeverity   bool
+
+	// Externals are already-validated "pred=file.csv" pairs, forwarded to
+	// `database analyze --external`. Queries that declare an `external`
+	// predicate cannot evaluate without them.
+	Externals []string
 }
 
 // QueryResult is the output of a single RunQuery call.
@@ -104,7 +109,11 @@ func RunQuery(ctx context.Context, query string, target ScanTarget, codeqlFormat
 		parts = append(parts, sanitizeName(target.Project))
 	}
 	parts = append(parts, lang)
-	outFile := filepath.Join(tmpDir, strings.Join(parts, "_")+"."+TempExt(codeqlFormat))
+	base := strings.Join(parts, "_")
+	outFile := filepath.Join(tmpDir, base)
+	if ext := TempExt(codeqlFormat); ext != "" {
+		outFile += "." + ext
+	}
 	label := fmt.Sprintf("[%s] %s", target.Label(), filepath.Base(query))
 
 	if cfg.Fancy {
@@ -131,7 +140,7 @@ func RunQuery(ctx context.Context, query string, target ScanTarget, codeqlFormat
 		// Pre-query lock sweep
 		HandleCacheLocks(dbPath, cfg.UnlockCache, cfg.CheckLockProcess, cfg.KillLockProcess, cfg.Verbose)
 
-		ok, stderr, timedOut := analyzeOnce(queryCtx, query, dbPath, codeqlFormat, outFile, cfg.Verbose)
+		ok, stderr, timedOut := analyzeOnce(queryCtx, query, dbPath, codeqlFormat, outFile, cfg)
 
 		if timedOut {
 			elapsed := int(time.Since(tStart).Seconds())
@@ -160,7 +169,7 @@ func RunQuery(ctx context.Context, query string, target ScanTarget, codeqlFormat
 			}
 			if retried {
 				time.Sleep(250 * time.Millisecond)
-				ok, stderr, timedOut = analyzeOnce(queryCtx, query, dbPath, codeqlFormat, outFile, cfg.Verbose)
+				ok, stderr, timedOut = analyzeOnce(queryCtx, query, dbPath, codeqlFormat, outFile, cfg)
 				if timedOut {
 					elapsed := int(time.Since(tStart).Seconds())
 					appendLog("hydraql_failures.log", fmt.Sprintf("TIMEOUT after %ds: %s on %s\n", elapsed, query, lang))
@@ -201,10 +210,15 @@ func RunQuery(ctx context.Context, query string, target ScanTarget, codeqlFormat
 	return result
 }
 
-func analyzeOnce(ctx context.Context, query, dbPath, format, outFile string, verbose bool) (ok bool, stderr string, timedOut bool) {
-	cmd := exec.CommandContext(ctx, "codeql", "database", "analyze",
-		dbPath, "--format", format, "--output", outFile, query)
-	if verbose {
+func analyzeOnce(ctx context.Context, query, dbPath, format, outFile string, cfg *RunConfig) (ok bool, stderr string, timedOut bool) {
+	args := []string{"database", "analyze", dbPath, "--format", format, "--output", outFile}
+	for _, ext := range cfg.Externals {
+		args = append(args, "--external="+ext)
+	}
+	args = append(args, query)
+
+	cmd := exec.CommandContext(ctx, "codeql", args...)
+	if verbose := cfg.Verbose; verbose {
 		fmt.Printf("   cmd: %s\n", strings.Join(cmd.Args, " "))
 	}
 	var stderrBuf bytes.Buffer
@@ -220,10 +234,16 @@ func analyzeOnce(ctx context.Context, query, dbPath, format, outFile string, ver
 }
 
 func countFindings(path, codeqlFormat, severityFilter string, strict bool) int {
-	if codeqlFormat == "csv" {
+	switch {
+	case IsGraphFormat(codeqlFormat):
+		// Graph output describes a query's structure, not alerts, so there is
+		// nothing to count.
+		return 0
+	case codeqlFormat == "csv":
 		return merge.CountCSV(path, severityFilter, strict)
+	default:
+		return merge.CountSARIF(path, severityFilter, strict)
 	}
-	return merge.CountSARIF(path, severityFilter, strict)
 }
 
 func appendLog(logFile, msg string) {
