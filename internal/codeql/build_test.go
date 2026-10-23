@@ -686,3 +686,54 @@ func TestFindNestedSymlinksCleanTree(t *testing.T) {
 		t.Errorf("a tree with no symlinks reported %d: %v", total, found)
 	}
 }
+
+// A cluster create exits non-zero when any single language fails, so "every
+// create failed" must not be reported while a language was still salvaged.
+// Doing so printed "javascript ready" and "every create failed" together.
+func TestClassifyDoesNotClaimTotalFailureWhenSomethingSurvived(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "cqlDB_proj")
+	writeDB(t, filepath.Join(dbPath, "javascript"), "javascript")
+	// python got a directory but nothing extracted, as CodeQL leaves behind.
+	if err := os.MkdirAll(filepath.Join(dbPath, "python"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Project{Name: "proj", DBPath: dbPath}
+	cfg := &BuildConfig{Langs: []string{"javascript", "python"}}
+	out := classify(p, cfg)
+
+	if len(out.Usable) != 1 || out.Usable[0] != "javascript" {
+		t.Fatalf("Usable = %v, want [javascript]", out.Usable)
+	}
+	if len(out.Empty) != 1 || out.Empty[0] != "python" {
+		t.Fatalf("Empty = %v, want [python]", out.Empty)
+	}
+
+	// The same condition buildOne applies: one create, one failure, but a
+	// usable language, so this is partial success rather than total failure.
+	creates, failures := 1, 1
+	out.AllCreatesFailed = creates > 0 && failures == creates && len(out.Usable) == 0
+	if out.AllCreatesFailed {
+		t.Error("AllCreatesFailed must be false when a language was salvaged")
+	}
+	if !out.OK() {
+		t.Error("OK() should be true with one usable language")
+	}
+}
+
+// An interpreted language with no database means the tree has no such code,
+// which is a different thing from a compiled language whose build produced
+// nothing, and the advice differs.
+func TestNeedsBuild(t *testing.T) {
+	for _, lang := range []string{"java", "kotlin", "cpp", "csharp", "go", "swift", "rust"} {
+		if !NeedsBuild(lang) {
+			t.Errorf("NeedsBuild(%q) = false, want true", lang)
+		}
+	}
+	for _, lang := range []string{"javascript", "typescript", "python", "ruby", "actions"} {
+		if NeedsBuild(lang) {
+			t.Errorf("NeedsBuild(%q) = true, want false", lang)
+		}
+	}
+}

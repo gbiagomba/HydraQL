@@ -36,6 +36,17 @@ var knownLanguages = map[string]bool{
 	"ruby": true, "swift": true, "rust": true, "actions": true,
 }
 
+// compiledLanguages need a real build for CodeQL to see anything. The rest
+// extract straight from source, so an empty database means the tree simply has
+// no code in that language.
+var compiledLanguages = map[string]bool{
+	"java": true, "kotlin": true, "cpp": true, "csharp": true,
+	"go": true, "swift": true, "rust": true,
+}
+
+// NeedsBuild reports whether a language requires a build command to extract.
+func NeedsBuild(lang string) bool { return compiledLanguages[strings.ToLower(lang)] }
+
 // IsKnownLanguage reports whether name is a language HydraQL recognizes.
 func IsKnownLanguage(name string) bool { return knownLanguages[strings.ToLower(name)] }
 

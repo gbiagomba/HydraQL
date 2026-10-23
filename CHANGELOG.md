@@ -2,6 +2,11 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.8.1] - 2026-10-23
+### Fixed
+- **The build summary contradicted itself.** A cluster create exits non-zero when any one of its languages fails, so a failed create does not mean nothing was produced. `AllCreatesFailed` was set from the exit codes alone, which printed `✅ javascript ready` directly above `✖ Every codeql database create call failed`. It now also requires that the salvage pass found nothing usable.
+- **An absent language was blamed on the build command.** A package with no Python in it reported "python extracted no code" and advised supplying a build command that invokes a compiler, which is wrong twice over for an interpreted language. Empty languages are now split by whether they need a build: a compiled language gets the build-command advice, while an interpreted one reports "no python source found in this tree" and suggests dropping it from `--langs`.
+
 ## [2.8.0] - 2026-10-23
 ### Added
 - **Nested symlinks are now reported.** HydraQL resolves the source root it hands to CodeQL, but CodeQL does not follow symlinks found *inside* that root and reports no error for them. A tree whose code sits behind nested links therefore produces a database that looks healthy and is missing most of the source.

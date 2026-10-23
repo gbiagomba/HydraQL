@@ -626,7 +626,10 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) BuildOutcome {
 	finalizeCluster(p, cfg)
 
 	out := classify(p, cfg)
-	out.AllCreatesFailed = creates > 0 && failures == creates
+	// A cluster create exits non-zero when any one of its languages fails, so a
+	// failed create does not mean nothing was produced. Only claim total
+	// failure when the salvage pass also found nothing usable.
+	out.AllCreatesFailed = creates > 0 && failures == creates && len(out.Usable) == 0
 	reportOutcome(out, cfg)
 	return out
 }
@@ -778,12 +781,29 @@ func reportOutcome(out BuildOutcome, cfg *BuildConfig) {
 				report.Red, out.Project.Name, strings.Join(out.Empty, ", "), report.Reset)
 			fmt.Printf("      Every codeql database create call failed; see the error above and hydraql_failures.log.\n")
 		} else {
-			fmt.Printf("   %s⚠️  %s: %s extracted no code%s\n",
-				report.Yellow, out.Project.Name, strings.Join(out.Empty, ", "), report.Reset)
-			if !cfg.CreateOptions.HasPerLang() && len(cfg.CreateOptions.BuildCommands) == 0 {
-				fmt.Printf("      A compiled language needs --build-command naming a command that invokes its compiler.\n")
-			} else {
-				fmt.Printf("      Check that the build command actually compiles those languages; CodeQL only sees a real build.\n")
+			// Separate the two causes: a compiled language needs a build, while
+			// an interpreted one that came up empty simply is not in the tree.
+			var needsBuild, absent []string
+			for _, lang := range out.Empty {
+				if NeedsBuild(lang) {
+					needsBuild = append(needsBuild, lang)
+				} else {
+					absent = append(absent, lang)
+				}
+			}
+			if len(absent) > 0 {
+				fmt.Printf("   %s⚠️  %s: no %s source found in this tree%s\n",
+					report.Yellow, out.Project.Name, strings.Join(absent, ", "), report.Reset)
+				fmt.Printf("      Drop it from --langs to skip the extraction attempt.\n")
+			}
+			if len(needsBuild) > 0 {
+				fmt.Printf("   %s⚠️  %s: %s extracted no code%s\n",
+					report.Yellow, out.Project.Name, strings.Join(needsBuild, ", "), report.Reset)
+				if len(cfg.CreateOptions.CommandsFor(needsBuild[0])) == 0 {
+					fmt.Printf("      A compiled language needs --build-command naming a command that invokes its compiler.\n")
+				} else {
+					fmt.Printf("      Check that the build command actually compiles it; CodeQL only sees a real build.\n")
+				}
 			}
 		}
 	}
