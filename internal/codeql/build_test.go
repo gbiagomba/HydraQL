@@ -472,45 +472,74 @@ func TestGroupLangs(t *testing.T) {
 	}
 }
 
-// One group uses --db-cluster; several groups create each language separately,
-// because --overwrite against a cluster root guts its sibling languages.
-func TestCreateArgsShapePerGroupCount(t *testing.T) {
+// One group is a single cluster create. With several groups the largest
+// clusterable group still shares one source scan, and only the command-bound
+// languages are created individually. The cluster job must run first: a cluster
+// --overwrite destroys sibling language directories, while a per-language
+// --overwrite leaves them intact.
+func TestPlanCreates(t *testing.T) {
 	p := Project{Name: "src", SourceRoot: "/src", DBPath: "cqlDB_src"}
 
-	single := CreateOptions{BuildCommands: []string{"./build.sh"}}
-	groups := groupLangs([]string{"javascript", "java"}, single)
-	cfg := &BuildConfig{Langs: []string{"javascript", "java"}, CreateOptions: single, Rebuild: true}
-	args := createArgs(p, groups[0], groups, cfg)
-	if len(args) != 1 {
-		t.Fatalf("one group should yield one invocation, got %d", len(args))
-	}
-	joined := strings.Join(args[0], " ")
-	for _, want := range []string{"--db-cluster", "--language=javascript,java", "--command=./build.sh", "--overwrite", "cqlDB_src"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("cluster args missing %q: %s", want, joined)
+	t.Run("single group is one cluster", func(t *testing.T) {
+		opts := CreateOptions{BuildCommands: []string{"./build.sh"}}
+		langs := []string{"javascript", "java"}
+		cfg := &BuildConfig{Langs: langs, CreateOptions: opts, Rebuild: true}
+		jobs := planCreates(p, groupLangs(langs, opts), cfg)
+		if len(jobs) != 1 || !jobs[0].cluster {
+			t.Fatalf("want one cluster job, got %+v", jobs)
 		}
-	}
+		joined := strings.Join(jobs[0].args, " ")
+		for _, want := range []string{"--db-cluster", "--language=javascript,java", "--command=./build.sh", "--overwrite"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("missing %q in %s", want, joined)
+			}
+		}
+	})
 
-	multi := CreateOptions{PerLang: map[string][]string{"java": {"./build.sh build-android"}}}
-	mgroups := groupLangs([]string{"javascript", "java"}, multi)
-	mcfg := &BuildConfig{Langs: []string{"javascript", "java"}, CreateOptions: multi, Rebuild: true}
-	if len(mgroups) != 2 {
-		t.Fatalf("got %d groups, want 2", len(mgroups))
-	}
-	for i, g := range mgroups {
-		got := createArgs(p, g, mgroups, mcfg)
-		if len(got) != 1 {
-			t.Fatalf("group %d yielded %d invocations, want 1", i, len(got))
+	t.Run("mixed groups still cluster the shared ones", func(t *testing.T) {
+		opts := CreateOptions{PerLang: map[string][]string{
+			"java":  {"./build.sh build-android"},
+			"swift": {"./build.sh build-ios"},
+		}}
+		langs := []string{"javascript", "python", "java", "swift"}
+		cfg := &BuildConfig{Langs: langs, CreateOptions: opts, Rebuild: true}
+		jobs := planCreates(p, groupLangs(langs, opts), cfg)
+
+		// Four languages, three scans: javascript and python share one.
+		if len(jobs) != 3 {
+			t.Fatalf("want 3 create calls, got %d: %+v", len(jobs), jobs)
 		}
-		joined := strings.Join(got[0], " ")
-		if strings.Contains(joined, "--db-cluster") {
-			t.Errorf("group %d must not use --db-cluster: %s", i, joined)
+		if !jobs[0].cluster {
+			t.Error("the cluster job must run before any per-language --overwrite")
 		}
-		lang := g.langs[0]
-		if !strings.Contains(joined, filepath.Join("cqlDB_src", lang)) {
-			t.Errorf("group %d should target cqlDB_src/%s: %s", i, lang, joined)
+		if strings.Join(jobs[0].langs, ",") != "javascript,python" {
+			t.Errorf("cluster job langs = %v, want javascript,python", jobs[0].langs)
 		}
-	}
+		for _, j := range jobs[1:] {
+			if j.cluster {
+				t.Errorf("job %v should not be a cluster", j.langs)
+			}
+			lang := j.langs[0]
+			if !strings.Contains(strings.Join(j.args, " "), filepath.Join("cqlDB_src", lang)) {
+				t.Errorf("job for %s should target cqlDB_src/%s", lang, lang)
+			}
+		}
+	})
+
+	t.Run("all groups single means no cluster", func(t *testing.T) {
+		opts := CreateOptions{PerLang: map[string][]string{"java": {"a"}, "swift": {"b"}}}
+		langs := []string{"java", "swift"}
+		cfg := &BuildConfig{Langs: langs, CreateOptions: opts}
+		jobs := planCreates(p, groupLangs(langs, opts), cfg)
+		if len(jobs) != 2 {
+			t.Fatalf("want 2 jobs, got %d", len(jobs))
+		}
+		for _, j := range jobs {
+			if j.cluster {
+				t.Errorf("clustering a single language saves nothing; %v should be single", j.langs)
+			}
+		}
+	})
 }
 
 // A per-language create targets <DBPath>/<lang>, so <DBPath> itself must exist
@@ -592,5 +621,68 @@ func TestBuildOutcomeCauseAttribution(t *testing.T) {
 	}
 	if partial.AllCreatesFailed {
 		t.Error("a partial build did not have all creates fail")
+	}
+}
+
+// CodeQL does not follow symlinks found inside a source root and reports no
+// error for them, so a tree whose code sits behind nested links yields a
+// database that looks fine and is missing most of the source. Detecting them
+// is the only way the gap becomes visible.
+func TestFindNestedSymlinks(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "elsewhere", "pkg")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	src := filepath.Join(root, "src")
+	if err := os.MkdirAll(filepath.Join(src, "hz"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(src, "hz", "linked-pkg")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("cannot create symlinks on this host: %v", err)
+		}
+		t.Fatal(err)
+	}
+	// A symlink to a file hides no source tree and must be ignored.
+	plainFile := filepath.Join(root, "elsewhere", "note.txt")
+	if err := os.WriteFile(plainFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(plainFile, filepath.Join(src, "hz", "linked-file")); err != nil {
+		t.Fatal(err)
+	}
+	// An excluded directory's contents must not be reported.
+	if err := os.MkdirAll(filepath.Join(src, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(src, "node_modules", "dep")); err != nil {
+		t.Fatal(err)
+	}
+
+	found, total := findNestedSymlinks(src, DefaultExcludes)
+	if total != 1 {
+		t.Fatalf("total = %d, want 1 (the directory symlink only): %v", total, found)
+	}
+	if len(found) != 1 || !strings.Contains(found[0], "linked-pkg") {
+		t.Errorf("found = %v, want the linked-pkg entry", found)
+	}
+	if !strings.Contains(found[0], "->") {
+		t.Errorf("found = %v, want it to name the resolved target", found)
+	}
+}
+
+func TestFindNestedSymlinksCleanTree(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a", "b", "x.js"), []byte("//"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	found, total := findNestedSymlinks(root, DefaultExcludes)
+	if total != 0 || len(found) != 0 {
+		t.Errorf("a tree with no symlinks reported %d: %v", total, found)
 	}
 }

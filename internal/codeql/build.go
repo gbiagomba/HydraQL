@@ -389,10 +389,88 @@ func DiscoverProjects(cfg *BuildConfig) ([]Project, error) {
 		} else if cfg.Verbose {
 			fmt.Printf("  • %s: %s\n", name, p.SourceRoot)
 		}
+		warnNestedSymlinks(p, cfg)
 	}
 
 	sort.Slice(projects, func(i, j int) bool { return projects[i].Name < projects[j].Name })
 	return projects, nil
+}
+
+// nestedSymlinkDepth bounds the search for symlinks inside a source root. Only
+// directory entries are read, never file contents, so a few levels stay cheap
+// even on a very large tree.
+const nestedSymlinkDepth = 3
+
+// nestedSymlinkLimit caps how many are listed, to keep the warning readable.
+const nestedSymlinkLimit = 10
+
+// findNestedSymlinks lists directory symlinks inside root, which CodeQL will
+// not follow when it extracts.
+func findNestedSymlinks(root string, exclude []string) (found []string, total int) {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || path == root {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		name := d.Name()
+		if strings.HasPrefix(name, ".") || excluded(name, exclude) || nonLangDirs[strings.ToLower(name)] {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			// Only a symlink that resolves to a directory hides source.
+			if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+				total++
+				if len(found) < nestedSymlinkLimit {
+					target, _ := filepath.EvalSymlinks(path)
+					found = append(found, rel+" -> "+target)
+				}
+			}
+			return nil
+		}
+		if d.IsDir() && strings.Count(filepath.ToSlash(rel), "/") >= nestedSymlinkDepth-1 {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return found, total
+}
+
+// warnNestedSymlinks reports source that will silently go unanalyzed.
+//
+// HydraQL resolves the source root it hands to CodeQL, but CodeQL does not
+// follow symlinks found *inside* that root, and it reports no error for them.
+// A tree whose code sits behind nested links therefore produces a database
+// that looks fine and is missing most of the source, so this is worth saying
+// loudly rather than leaving to be discovered later.
+func warnNestedSymlinks(p Project, cfg *BuildConfig) {
+	found, total := findNestedSymlinks(p.SourceRoot, cfg.Exclude)
+	if total == 0 {
+		return
+	}
+	fmt.Printf("  %s⚠️  %s contains %d symlinked director%s that CodeQL will not follow:%s\n",
+		report.Yellow, p.Name, total, plural(total), report.Reset)
+	for _, entry := range found {
+		fmt.Printf("       %s\n", entry)
+	}
+	if total > len(found) {
+		fmt.Printf("       … and %d more\n", total-len(found))
+	}
+	fmt.Printf("     That code will NOT be analyzed. To include it, point --build-root at the\n")
+	fmt.Printf("     directory holding the links so each becomes its own project, or pass each\n")
+	fmt.Printf("     resolved target as its own --source-dir.\n")
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ies"
 }
 
 // dbFinalized reads the finalised flag out of a database's metadata.
@@ -497,11 +575,11 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) BuildOutcome {
 		return classify(p, cfg)
 	}
 
+	jobs := planCreates(p, groups, cfg)
+
 	if cfg.DryRun {
-		for _, g := range groups {
-			for _, args := range createArgs(p, g, groups, cfg) {
-				fmt.Printf("  [dry-run] codeql %s\n", strings.Join(args, " "))
-			}
+		for _, j := range jobs {
+			fmt.Printf("  [dry-run] codeql %s\n", strings.Join(j.args, " "))
 		}
 		return BuildOutcome{Project: p}
 	}
@@ -510,8 +588,11 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) BuildOutcome {
 	// A cluster create targets p.DBPath, so only its parent must exist; a
 	// per-language create targets p.DBPath/<lang>, so p.DBPath itself must.
 	needed := filepath.Dir(p.DBPath)
-	if len(groups) > 1 {
-		needed = p.DBPath
+	for _, j := range jobs {
+		if !j.cluster {
+			needed = p.DBPath
+			break
+		}
 	}
 	if err := os.MkdirAll(needed, 0o755); err != nil {
 		fmt.Printf("%s✖ Cannot create %s: %v%s\n", report.Red, needed, err, report.Reset)
@@ -521,22 +602,18 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) BuildOutcome {
 		HandleCacheLocks(p.DBPath, cfg.UnlockCache, cfg.CheckLockProcess, cfg.KillLockProcess, cfg.Verbose)
 	}
 
-	if len(groups) > 1 {
-		fmt.Printf("  %sℹ  %d build command groups, so each language is created separately.%s\n",
-			report.Yellow, len(groups), report.Reset)
-		fmt.Printf("     A cluster --overwrite destroys sibling languages, and the source is rescanned per language.\n")
+	if len(jobs) > 1 {
+		fmt.Printf("  %sℹ  %d build command group(s) means %d create call(s), so the source is scanned %d time(s).%s\n",
+			report.Yellow, len(groups), len(jobs), len(jobs), report.Reset)
 	}
 
 	failures := 0
-	creates := 0
-	for _, g := range groups {
-		for _, args := range createArgs(p, g, groups, cfg) {
-			creates++
-			if !runCreate(ctx, p, g, args, cfg) {
-				failures++
-			}
+	for _, j := range jobs {
+		if !runCreate(ctx, p, j, cfg) {
+			failures++
 		}
 	}
+	creates := len(jobs)
 
 	// Finalize regardless of exit codes. CodeQL finalizes a cluster as one step
 	// at the end, so one language failing there leaves every language
@@ -554,46 +631,78 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) BuildOutcome {
 	return out
 }
 
-// createArgs renders the `database create` invocations for one group. A single
-// group uses --db-cluster, which shares one source scan across its languages.
-// With several groups each language is created on its own, because --overwrite
-// against a cluster root destroys the sibling language directories.
-func createArgs(p Project, g buildGroup, groups []buildGroup, cfg *BuildConfig) [][]string {
-	if len(groups) == 1 {
-		args := []string{"database", "create", p.DBPath,
-			"--db-cluster",
-			"--language=" + strings.Join(g.langs, ","),
-			"--source-root=" + p.SourceRoot,
-		}
-		args = append(args, cfg.CreateOptions.args(g.langs)...)
-		if cfg.Rebuild {
-			args = append(args, "--overwrite")
-		}
-		return [][]string{args}
-	}
-
-	var out [][]string
-	for _, lang := range g.langs {
-		args := []string{"database", "create", filepath.Join(p.DBPath, lang),
-			"--language=" + lang,
-			"--source-root=" + p.SourceRoot,
-		}
-		args = append(args, cfg.CreateOptions.args([]string{lang})...)
-		if cfg.Rebuild {
-			args = append(args, "--overwrite")
-		}
-		out = append(out, args)
-	}
-	return out
+// createJob is one `database create` invocation.
+type createJob struct {
+	langs   []string
+	args    []string
+	cluster bool
 }
 
-func runCreate(ctx context.Context, p Project, g buildGroup, args []string, cfg *BuildConfig) bool {
-	label := p.Name + " (" + strings.Join(g.langs, ",") + ")"
-	for i, a := range args {
-		if strings.HasPrefix(a, "--language=") && i > 0 {
-			label = p.Name + " (" + strings.TrimPrefix(a, "--language=") + ")"
+// planCreates returns every create invocation for a project, in execution
+// order.
+//
+// At most one group may use --db-cluster, and it has to run first. A cluster
+// create with --overwrite destroys the sibling language directories under its
+// root, while a per-language create with --overwrite leaves them alone (both
+// measured against CodeQL 2.25.6). Clustering the largest group keeps one
+// shared source scan for the languages that can share one, which matters when
+// the source tree is large.
+func planCreates(p Project, groups []buildGroup, cfg *BuildConfig) []createJob {
+	clusterIdx := -1
+	if len(groups) == 1 {
+		clusterIdx = 0
+	} else {
+		best := 1 // only worth clustering two or more languages
+		for i, g := range groups {
+			if len(g.langs) > best {
+				best, clusterIdx = len(g.langs), i
+			}
 		}
 	}
+
+	var jobs []createJob
+	if clusterIdx >= 0 {
+		jobs = append(jobs, clusterJob(p, groups[clusterIdx], cfg))
+	}
+	for i, g := range groups {
+		if i == clusterIdx {
+			continue
+		}
+		for _, lang := range g.langs {
+			jobs = append(jobs, singleJob(p, g, lang, cfg))
+		}
+	}
+	return jobs
+}
+
+func clusterJob(p Project, g buildGroup, cfg *BuildConfig) createJob {
+	args := []string{"database", "create", p.DBPath,
+		"--db-cluster",
+		"--language=" + strings.Join(g.langs, ","),
+		"--source-root=" + p.SourceRoot,
+	}
+	args = append(args, cfg.CreateOptions.args(g.langs)...)
+	if cfg.Rebuild {
+		args = append(args, "--overwrite")
+	}
+	return createJob{langs: g.langs, args: args, cluster: true}
+}
+
+func singleJob(p Project, g buildGroup, lang string, cfg *BuildConfig) createJob {
+	args := []string{"database", "create", filepath.Join(p.DBPath, lang),
+		"--language=" + lang,
+		"--source-root=" + p.SourceRoot,
+	}
+	args = append(args, cfg.CreateOptions.args([]string{lang})...)
+	if cfg.Rebuild {
+		args = append(args, "--overwrite")
+	}
+	return createJob{langs: []string{lang}, args: args}
+}
+
+func runCreate(ctx context.Context, p Project, j createJob, cfg *BuildConfig) bool {
+	args := j.args
+	label := p.Name + " (" + strings.Join(j.langs, ",") + ")"
 
 	if cfg.Fancy {
 		fmt.Printf("%s🏗  Building %s%s\n", report.Cyan, label, report.Reset)

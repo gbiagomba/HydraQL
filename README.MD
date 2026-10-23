@@ -41,7 +41,7 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
 - 🏗️ **One-stop build and scan** (`-b` / `--build-root`): creates a database cluster per project source dir, finalizes it, then scans it. No separate `codeql database create` / `finalize` loops
 - 🔨 **Build commands for compiled languages** (`--build-command`, `--build-mode`): passthrough to CodeQL's `--command`, bindable per language (`java=...`), so a tree that builds Android and iOS differently works in one run
 - 🩹 **Partly built clusters are salvaged**: one language failing its build no longer discards the languages that extracted fine
-- 🔗 **Symlink resolution** (on by default): a symlinked source root is resolved to its real target before CodeQL sees it, so extraction stays scoped to the linked subtree instead of widening to the link targets' common ancestor
+- 🔗 **Symlink resolution** (on by default): a symlinked source root is resolved to its real target before CodeQL sees it, so extraction stays scoped to the linked subtree instead of widening to the link targets' common ancestor. Symlinks *nested inside* a source root, which CodeQL silently skips, are reported rather than left to be discovered later
 - 🗂️ **Multi-database scanning**: one run fans out across every project under `--db-root`, and findings carry the project they came from
 - 🛡️ Database preflight: presence, finalization, structure, and emptiness checks
 - 🔒 IMB cache lock detection and auto-removal (`-u` / `--unlock-cache`)
@@ -285,10 +285,12 @@ A value is treated as per-language only when the text before the first `=` is a
 known language with no whitespace, so `make CC=gcc` stays a global command.
 `kotlin=` resolves to `java`, matching CodeQL's extractor set.
 
-Languages sharing a command list build together in one cluster. When commands
-differ, each language is created on its own, because `--overwrite` against a
-cluster root destroys its sibling language directories. That costs one source
-scan per language, and the run says so when it takes that route.
+Languages sharing a command list build together in one `--db-cluster`, sharing
+a single source scan. Only command-bound languages are created individually, and
+the cluster always runs first: a cluster `--overwrite` destroys the sibling
+language directories under its root, while a per-language `--overwrite` leaves
+them intact. A four-language build with two bound commands therefore costs three
+source scans, and the run header says how many it will be.
 
 #### A partly built cluster is kept
 
@@ -311,6 +313,44 @@ The scan then runs against the languages that worked.
 symlinks are resolved first, a `build.sh` sitting next to a *symlink* is not
 next to the directory CodeQL ends up in. Reference the script by a path that
 exists inside the real tree, or pass `--no-resolve-symlinks`.
+
+#### Symlinks nested inside a source root
+
+HydraQL resolves the source root it hands to CodeQL, but **CodeQL does not
+follow symlinks found inside that root**, and it reports no error for them. A
+tree like this analyzes none of the linked code:
+
+```
+src/
+├── hz/
+│   ├── nimbus-editor      -> /elsewhere/monorepo/mxp-modules/nimbus-editor
+│   └── native-mobile-utils -> /elsewhere/monorepo/platform/common/utils/...
+└── theo-android/
+```
+
+Pointing `--source-dir .` at `src` builds a database holding only
+`theo-android`, silently missing everything under `hz`. Neither `du` nor `find`
+reveals it, since neither follows symlinks by default.
+
+HydraQL reports this rather than letting it pass:
+
+```
+⚠️  src contains 4 symlinked directories that CodeQL will not follow:
+       hz/nimbus-editor -> /elsewhere/monorepo/mxp-modules/nimbus-editor
+       ...
+     That code will NOT be analyzed. To include it, point --build-root at the
+     directory holding the links so each becomes its own project, or pass each
+     resolved target as its own --source-dir.
+```
+
+So analyze the linked packages by making each one a project:
+
+```bash
+hydraql --build-root ./hz -d ./cqlDB -l javascript,typescript --build-only
+```
+
+and the real subtrees in their own runs into the same `--db-root`, so one scan
+covers every project afterwards.
 
 ### Flag Reference
 
@@ -537,8 +577,8 @@ On a `v*` tag push:
 
 To publish a release:
 ```bash
-git tag -a v2.7.0 -m "Release v2.7.0"
-git push origin v2.7.0
+git tag -a v2.8.0 -m "Release v2.8.0"
+git push origin v2.8.0
 ```
 
 Docker Hub publishing requires `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets set in the repository settings.

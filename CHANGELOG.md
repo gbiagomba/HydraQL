@@ -2,6 +2,18 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.8.0] - 2026-10-23
+### Added
+- **Nested symlinks are now reported.** HydraQL resolves the source root it hands to CodeQL, but CodeQL does not follow symlinks found *inside* that root and reports no error for them. A tree whose code sits behind nested links therefore produces a database that looks healthy and is missing most of the source.
+
+  Found in a real run: a project whose `hz/` directory held four symlinks into a separate monorepo built a JavaScript database containing 110 files of CodeQL's own bundled externs, 66 from one real subtree, 7 from another, and **zero** from `hz`, leaving 185 TypeScript files unanalyzed with no warning anywhere. `du` reported `hz` as 0B and `find` reported no `.ts` files, because neither follows symlinks either, so nothing about the tree made the gap visible.
+
+  Each source root is now scanned up to three directory levels for symlinks that resolve to directories, and every one is listed with its target, along with how to include it. Only directory entries are read, never file contents, so the check stays cheap on a large tree. Excluded directories, dot-directories, and symlinks to plain files are ignored.
+
+### Changed
+- **Languages that share a build command are clustered again.** 2.7.0 created every language separately as soon as any command was language-bound, which rescanned the source once per language. At most one group can use `--db-cluster` and it has to run first, because a cluster `--overwrite` destroys the sibling language directories under its root while a per-language `--overwrite` leaves them intact (both measured against CodeQL 2.25.6). The largest shareable group now takes the cluster and only command-bound languages are created individually, so a four-language build with two bound commands costs three source scans instead of four.
+- The run header states how many create calls and source scans the request costs.
+
 ## [2.7.1] - 2026-10-23
 ### Fixed
 - **Per-language builds failed for every language.** A cluster create targets the db-root and makes that directory itself, but a per-language create targets `<db-root>/<lang>` and requires the db-root to already exist. Only the db-root's *parent* was being created, so each language died on `A fatal error occurred: Cannot create database at .../cqlDB_src/javascript because .../cqlDB_src does not exist`. Every multi-group build was affected, which is every use of a language-bound `--build-command`. The directory that must exist is now chosen by the invocation shape.
