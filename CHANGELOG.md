@@ -2,6 +2,34 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.2.0] - 2026-10-23
+### Added
+- **One-stop build and scan** (`-b` / `--build-root`, `--source-dir`): HydraQL now creates the CodeQL databases it scans. For each project source directory it runs `codeql database create --db-cluster`, finalizes every language database in the cluster, then scans the result. This replaces the manual `codeql database create` and `codeql database finalize` shell loops.
+- **Symlink resolution for source roots**, on by default. Every component of a source root is resolved with `filepath.EvalSymlinks` before CodeQL sees it. Pointing CodeQL at a directory of symlinks otherwise makes it follow them and extract their common ancestor: a tree of four symlinks into a monorepo produced a single database of 10,052,360 lines rooted at the monorepo, where resolving each link first produces four databases of 3k to 16k lines. Disable with `--no-resolve-symlinks`.
+- **Multi-database scanning.** A run now fans out across every database under `--db-root` instead of one database per language. Three layouts are recognized: flat `<db-root>/<lang>/`, a single database at `<db-root>/`, and per-project `<db-root>/<project>/<lang>/`.
+- **Project attribution in every output format**: a leading `Project` column in CSV, a `project` key per JSON record, and `automationDetails.id` plus `properties.hydraql.project` on each SARIF run so GitHub Code Scanning can tell runs apart.
+- Per-project findings breakdown and a database count in the run summary.
+- New flags: `--db-prefix`, `--exclude`, `--build-only`, `--rebuild-db`, `--no-resolve-symlinks`, `--build-timeout`, and `-B` / `--build-threads`.
+
+### Fixed
+- **`-o sarif` and `-o json` never worked.** Both passed their own name to `codeql database analyze --format`, which accepts neither: `Invalid value for option '--format': expected one of [CSV, csv, SARIFLATEST, sarif-latest, ...] but was 'sarif'`. Every query failed and every run reported zero findings. HydraQL now requests `sarif-latest` for both and derives the JSON records from the SARIF, adding flattened `ruleId`, `severity`, `messageText`, `path`, and `startLine` fields. An unknown `--output-format` is now rejected up front instead of silently falling through to SARIF. The same defect is present in the legacy Python implementation.
+- **CSV merge dropped the first finding of every query.** `codeql database analyze --format=csv` emits bare data rows with no header, which is why the column names are hardcoded in this repo, but the merge and count paths both skipped row index 0. A header row is now detected by content rather than position.
+- **Languages are deduplicated before database creation.** CodeQL resolves `typescript` to the `javascript` extractor and has no separate `typescript` language, so `--language=javascript,typescript --db-cluster` risked extracting the same files twice into two sibling directories.
+- **`-X main.version` had no effect.** The Makefile injects the version at link time, but `version` was a `const`, which `-X` cannot patch. It is now a `var`.
+- **`make run NO_PACK=1` passed `--no-pack-install`, a flag that exists in neither implementation**, so the run died on an unrecognized argument. Replaced with `PACK_INSTALL=1`, matching the opt-in `--pack-install` the CLI actually has.
+- **Makefile paths containing spaces were split into separate arguments.** Path variables are now quoted at the use site, and the `LANGS` / `QUERY_DIRS` defaults no longer carry embedded quotes. The default `QUERY_DIRS` also no longer points at a nonexistent `~/Git/CQL`.
+- Progress ticker output no longer races the next log line; stopping the ticker waits for the line to be cleared.
+- `FinalizeDB` also treats "already been finalized" as success, matching the other phrasing CodeQL uses.
+- **A multi-language cluster no longer needs `--allow-missing-db`.** `database create --db-cluster --language=javascript,python` against a JavaScript-only tree warns ("CodeQL detected code written in JavaScript/TypeScript ... but not any written in Python"), exits 0, and leaves an empty `python/` directory. Detection counted that as a finalize failure and aborted the run. A cluster language directory with no `db-*` subdir is now skipped quietly.
+- **GitHub Releases had no release notes.** The CI step read the changelog under its old filename, matched `## [v2.2.0]` against headings written as `## [2.2.0]`, and used an awk range whose start line also matched its end pattern, so extraction always produced nothing and fell back to the raw tag message. All three are fixed.
+
+### Changed
+- `codeql database create --db-cluster` refuses to create its parent directory, so `--db-root` is created before the first build.
+- **Makefile now drives the Go binary.** Added `make scan`, `make scan-sarif`, `make scan-json`, `make scan-high`, `make all` (build then scan), `make build-db` (build only), and `make go-fmt`. Previously the only run targets were the legacy Python ones. Build-phase variables (`BUILD_ROOT`, `SOURCE_DIRS`, `DB_PREFIX`, `EXCLUDE`, `REBUILD_DB`, `RESOLVE_SYMLINKS`, `BUILD_TIMEOUT`, `BUILD_THREADS`) and `FORCE_UNREADY` are exposed.
+- `.dockerignore` excludes `cqlDB*/` so a local database tree is not uploaded into the Docker build context, and the Dockerfile documents the mounts each mode needs.
+- `CHANGELOD.MD` renamed to `CHANGELOG.md`.
+- Internal API: `codeql.DetectDatabases` is replaced by `codeql.DetectTargets` returning `[]ScanTarget`, `codeql.RunQuery` takes a `ScanTarget`, the `merge.Merge*` functions take `[]merge.Input`, and `report.PrintSummary` takes a `report.Summary`.
+
 ## [2.1.6] - 2026-07-06
 ### Fixed
 - **Panic in `readLockPID`**: `FindStringSubmatch` returns `nil` when no match; slicing `nil[1:]` panicked with "slice bounds out of range [1:0]". Triggered whenever a `.lock` file exists with empty or non-standard content. Guard added: only slice when `len(m) > 1`.

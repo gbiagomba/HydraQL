@@ -18,10 +18,13 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
   - [go install](#go-install-recommended)
   - [Pre-built Binary](#pre-built-binary)
   - [Build from Source](#build-from-source)
+  - [Makefile Run Targets](#makefile-run-targets)
   - [Docker](#docker)
   - [Python Legacy](#python-legacy)
 - [Usage](#usage)
+  - [Database Layouts](#database-layouts)
   - [Flag Reference](#flag-reference)
+  - [Output](#output)
   - [Examples](#examples)
 - [CI / Release](#ci--release)
 - [Contributing](#contributing)
@@ -35,6 +38,9 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
 - 📦 Optional `codeql pack install` (`-P` / `--pack-install`)
 - 🧩 Multiple query directories (comma-separated or repeated `-q`)
 - 🐍 Language aliasing (TypeScript→JavaScript, Kotlin→Java, Go→Go)
+- 🏗️ **One-stop build and scan** (`-b` / `--build-root`): creates a database cluster per project source dir, finalizes it, then scans it. No separate `codeql database create` / `finalize` loops
+- 🔗 **Symlink resolution** (on by default): a symlinked source root is resolved to its real target before CodeQL sees it, so extraction stays scoped to the linked subtree instead of widening to the link targets' common ancestor
+- 🗂️ **Multi-database scanning**: one run fans out across every project under `--db-root`, and findings carry the project they came from
 - 🛡️ Database preflight: presence, finalization, structure, and emptiness checks
 - 🔒 IMB cache lock detection and auto-removal (`-u` / `--unlock-cache`)
 - 🔧 DB automation: auto-finalize (`-F`) and auto-init (`-i`) with `--source-root`
@@ -98,7 +104,40 @@ make build          # native binary → ./hydraql
 make build-all      # all 6 platform binaries → dist/
 make go-test        # run tests
 make go-vet         # run go vet
+make go-fmt         # fail if anything is unformatted
 ```
+
+### Makefile Run Targets
+
+`make help` lists everything. The run targets wrap the binary so the common
+flags become variables:
+
+```bash
+# Scan databases that already exist under DB_ROOT
+make scan DB_ROOT=./cqlDB LANGS=javascript,typescript QUERY_DIRS=~/Git/codeql
+
+# Build a database per project, then scan them all
+make all BUILD_ROOT=~/Projects/App/src DB_ROOT=./cqlDB \
+  LANGS=javascript,typescript FORMAT=sarif
+
+# Build only, so the scan can run separately later
+make build-db BUILD_ROOT=~/Projects/App/src DB_ROOT=./cqlDB LANGS=javascript
+
+# Shorthands
+make scan-sarif          # FORMAT=sarif
+make scan-json           # FORMAT=json
+make scan-high           # SEVERITY=HIGH
+```
+
+Build-phase variables: `BUILD_ROOT`, `SOURCE_DIRS`, `DB_PREFIX`, `EXCLUDE`,
+`REBUILD_DB=1`, `RESOLVE_SYMLINKS=0`, `BUILD_TIMEOUT`, `BUILD_THREADS`.
+Scan variables: `DB_ROOT`, `LANGS`, `QUERY_DIRS`, `FORMAT`, `THREADS`,
+`SEVERITY`, `STRICT`, `FANCY`, `VERBOSE`, `DRY_RUN`, `ALLOW_MISSING`,
+`SUITE_ONLY`, `PACK_INSTALL`, `UNLOCK_CACHE`, `CHECK_LOCK_PROC`,
+`KILL_LOCK_PROC`, `AUTO_FINALIZE_DB`, `AUTO_INIT_DB`, `SOURCE_ROOT`,
+`FORCE_UNREADY`, `QUERY_TIMEOUT`, `NO_TIMEOUT`.
+
+`make run` and its variants still drive the legacy Python script.
 
 ### Docker
 
@@ -124,6 +163,9 @@ docker run --rm \
 ### Python (legacy)
 
 The original Python implementation lives in `legacy/` and remains functional at the v1.8.0 feature level.
+It has none of the v2.2.0 build, symlink, or multi-database features, and it still carries the
+`--format sarif` / `--format json` defect fixed in the Go edition, so only `--output-format csv`
+produces results there.
 
 ```bash
 # Prerequisites: Python 3.7+, CodeQL CLI in PATH
@@ -137,13 +179,63 @@ make run
 
 ## Usage
 
+### Database Layouts
+
+HydraQL recognizes three layouts under `--db-root` and picks whichever one it finds:
+
+| Layout | Shape | Project column |
+|--------|-------|----------------|
+| Flat | `<db-root>/<lang>/` | empty |
+| Single database | `<db-root>/codeql-database.yml` | the db-root's own name |
+| Per project | `<db-root>/<project>/<lang>/` | the project directory name |
+
+The per-project layout is what `--build-root` produces, and it is also CodeQL's
+own `--db-cluster` shape, so a cluster built by hand drops straight in:
+
+```
+cqlDB/
+├── accessibility-checker/
+│   └── javascript/
+└── pdf-export-core/
+    └── javascript/
+```
+
+Projects may differ in language. A project with no database for one of the
+requested languages is skipped quietly rather than failing the run.
+
+#### Build phase
+
+`--build-root <dir>` treats every child directory of `<dir>` as a project and,
+for each one, runs `codeql database create --db-cluster` followed by a finalize
+pass, then scans the result. `--source-dir` names project directories
+explicitly instead and can be combined with `--build-root`.
+
+Three things the equivalent shell loop gets wrong and this does not:
+
+1. **Symlinks are resolved first.** Pointing CodeQL at a directory of symlinks
+   makes it follow them and extract their common ancestor. A tree of four
+   symlinks into a monorepo produced one 10M-LOC database; resolving each link
+   first produced four databases of 3k to 16k LOC. Disable with
+   `--no-resolve-symlinks`.
+2. **Languages are deduplicated.** CodeQL has no separate `typescript`
+   extractor, so `--langs javascript,typescript` is collapsed to
+   `--language=javascript` rather than extracting the same files twice.
+3. **Existing databases are not rebuilt.** A directory that is already a usable
+   database is finalized and reused; pass `--rebuild-db` to force
+   `codeql database create --overwrite`. Previously built database directories
+   under `--build-root` are never mistaken for source projects.
+
+Directories that are never source projects (`node_modules`, `dist`, `build`,
+`reports`, and similar) are skipped by default. Pass `--exclude` to replace that
+list, or `--exclude ""` to disable it.
+
 ### Flag Reference
 
 All flags support both a short form (`-X`) and the traditional long form (`--flag-name`).
 
 | Short | Long                    | Default   | Description                                            |
 |-------|-------------------------|-----------|--------------------------------------------------------|
-| `-d`  | `--db-root`             | `cqlDB`   | Root of CodeQL databases (`<db-root>/<lang>/codeql-database.yml`) |
+| `-d`  | `--db-root`             | `cqlDB`   | Root of CodeQL databases (see [Database Layouts](#database-layouts)) |
 | `-l`  | `--langs`               | `java,javascript,typescript,python` | Comma-separated languages to scan |
 | `-q`  | `--query-dir`           | `~/Git/codeql` | Query directory (repeat or comma-separate for multiple) |
 | `-t`  | `--threads`             | `6`       | Parallel worker count (alias: `--parallel`)            |
@@ -163,13 +255,59 @@ All flags support both a short form (`-X`) and the traditional long form (`--fla
 | `-i`  | `--auto-init-db`        | `false`   | Create missing DBs (requires `--source-root`)          |
 | `-r`  | `--source-root`         | _(none)_  | Source root path for `--auto-init-db`                  |
 | `-R`  | `--force-scan-unready`  | `false`   | Scan DBs that appear empty or unusable                 |
+| `-b`  | `--build-root`          | _(none)_  | Parent directory of project source dirs; build a DB per child, then scan |
+|       | `--source-dir`          | _(none)_  | Explicit project source dir (repeat or comma-separate) |
+|       | `--db-prefix`           | `""`      | Prefix for each project's DB directory name (e.g. `cqlDB_eac-`) |
+|       | `--exclude`             | see above | Glob of `--build-root` child names to skip; `""` disables |
+|       | `--build-only`          | `false`   | Build and finalize databases, then exit without analyzing |
+|       | `--rebuild-db`          | `false`   | Force rebuild of existing DBs (`database create --overwrite`) |
+|       | `--no-resolve-symlinks` | `false`   | Do not resolve symlinked source roots before CodeQL sees them |
+|       | `--build-timeout`       | `0`       | Per-database creation timeout in seconds (`0` = none)  |
+| `-B`  | `--build-threads`       | `1`       | Concurrent database builds                             |
 | `-T`  | `--query-timeout`       | `600`     | Per-query timeout in seconds (`0` = no timeout)        |
 | `-N`  | `--no-timeout`          | `false`   | Disable per-query timeout entirely                     |
 | `-V`  | `--version`             | —         | Print version and exit                                 |
 
+### Output
+
+Results land in `HydraQL_output-<timestamp>.<csv|json|sarif>`, and every finding
+is tagged with the project whose database produced it:
+
+| Format | Project attribution |
+|--------|---------------------|
+| `csv`  | leading `Project` column |
+| `json` | `project` key per record, alongside flattened `ruleId`, `severity`, `messageText`, `path`, and `startLine` |
+| `sarif` | one run per query per project, with `automationDetails.id` and `properties.hydraql.project` set to the project name |
+
+CodeQL accepts neither `sarif` nor `json` as a `--format` value, so HydraQL
+requests `sarif-latest` for both and derives the JSON records from it.
+
 ### Examples
 
 ```bash
+# One-stop shop: build a database per project, then scan them all.
+# Each source dir is resolved through its symlinks before CodeQL sees it.
+./hydraql \
+  --build-root ~/Projects/MyMonorepoLinks/src \
+  -d ./cqlDB \
+  -l "javascript,typescript" \
+  -q ~/Git/codeql \
+  -o sarif -F -u -f
+
+# Build the databases and stop, so the scan can run separately later
+./hydraql --build-root ~/Projects/MyMonorepoLinks/src -d ./cqlDB -l javascript --build-only -f
+
+# Two named projects, naming the DB dirs cqlDB_eac-<project>
+./hydraql \
+  --source-dir ~/Projects/App/src/feature-a,~/Projects/App/src/feature-b \
+  -d ./cqlDB --db-prefix cqlDB_eac- -l javascript -q ~/Git/codeql -f
+
+# Rebuild from scratch after the source trees moved
+./hydraql --build-root ~/Projects/App/src -d ./cqlDB -l javascript --rebuild-db -f
+
+# See the build plan, including every resolved source root, without running CodeQL
+./hydraql --build-root ~/Projects/App/src -d ./cqlDB -l javascript,typescript -n -v
+
 # Full scan — real-world AEM codebase (long flags)
 ./hydraql \
   --db-root ./cqlDB_AEM \
@@ -227,8 +365,8 @@ On a `v*` tag push:
 
 To publish a release:
 ```bash
-git tag -a v2.1.6 -m "Release v2.1.6"
-git push origin v2.1.6
+git tag -a v2.2.0 -m "Release v2.2.0"
+git push origin v2.2.0
 ```
 
 Docker Hub publishing requires `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets set in the repository settings.

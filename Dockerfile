@@ -49,5 +49,17 @@ RUN chmod +x /usr/local/bin/hydraql
 USER hydra
 WORKDIR /app
 
+# Scanning existing databases needs the database tree and the queries mounted:
+#   docker run --rm -v "$PWD/cqlDB:/app/cqlDB" -v "$HOME/Git/codeql:/app/queries:ro" \
+#     hydraql -d /app/cqlDB -l javascript -q /app/queries -o sarif
+#
+# Building databases (--build-root / --source-dir) additionally needs the source
+# mounted, and the db-root mount must be writable. Symlinks are resolved inside
+# the container, so a link whose target falls outside the mounts cannot be
+# followed: mount the resolved paths, or pass --no-resolve-symlinks.
+#   docker run --rm -v "$PWD/cqlDB:/app/cqlDB" -v "/path/to/src:/app/src:ro" \
+#     -v "$HOME/Git/codeql:/app/queries:ro" \
+#     hydraql --build-root /app/src -d /app/cqlDB -l javascript -q /app/queries
+
 ENTRYPOINT ["hydraql"]
 CMD ["--help"]

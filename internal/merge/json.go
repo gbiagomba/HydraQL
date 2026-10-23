@@ -24,13 +24,13 @@ func CountJSON(path, severityFilter string, strict bool) int {
 	return count
 }
 
-func MergeJSON(files []string, output, severityFilter string, strict bool) (int, error) {
-	var merged []map[string]any
-	for _, path := range files {
-		if path == "" {
+func MergeJSON(files []Input, output, severityFilter string, strict bool) (int, error) {
+	merged := []map[string]any{}
+	for _, in := range files {
+		if in.Path == "" {
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(in.Path)
 		if err != nil {
 			continue
 		}
@@ -40,6 +40,9 @@ func MergeJSON(files []string, output, severityFilter string, strict bool) (int,
 				if !SeverityMatches(sev, severityFilter, strict) {
 					continue
 				}
+			}
+			if in.Project != "" {
+				item["project"] = in.Project
 			}
 			merged = append(merged, item)
 		}
@@ -70,6 +73,11 @@ func parseJSONItems(data []byte) []map[string]any {
 		}
 		return out
 	case map[string]any:
+		// CodeQL cannot emit plain JSON, so --output-format json is produced
+		// from the SARIF that analyze actually wrote.
+		if runs, ok := v["runs"].([]any); ok {
+			return flattenSARIFRuns(runs)
+		}
 		if results, ok := v["results"].([]any); ok {
 			var out []map[string]any
 			for _, elem := range results {
@@ -81,6 +89,48 @@ func parseJSONItems(data []byte) []map[string]any {
 		}
 	}
 	return nil
+}
+
+// flattenSARIFRuns turns SARIF runs into one record per result. The original
+// SARIF fields are preserved; severity, ruleId, messageText, path, and
+// startLine are added so records are usable without walking the SARIF tree.
+func flattenSARIFRuns(runs []any) []map[string]any {
+	var out []map[string]any
+	for _, r := range runs {
+		run, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		ruleSeverity := buildRuleSeverityMap(run)
+		results, _ := run["results"].([]any)
+		for _, res := range results {
+			m, ok := res.(map[string]any)
+			if !ok {
+				continue
+			}
+			item := shallowCopy(m)
+			ruleID := sarifRuleID(m)
+			if ruleID != "" {
+				item["ruleId"] = ruleID
+				if jsonSeverity(item) == "" {
+					if sev := ruleSeverity[ruleID]; sev != "" {
+						item["severity"] = sev
+					}
+				}
+			}
+			if text := sarifMessageText(m); text != "" {
+				item["messageText"] = text
+			}
+			if path, line := sarifLocation(m); path != "" {
+				item["path"] = path
+				if line > 0 {
+					item["startLine"] = line
+				}
+			}
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func jsonSeverity(item map[string]any) string {

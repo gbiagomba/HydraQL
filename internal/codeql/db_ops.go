@@ -13,7 +13,7 @@ func FinalizeDB(dbDir string, verbose bool) bool {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		stderr := string(out)
-		if strings.Contains(stderr, "already finalized") {
+		if strings.Contains(stderr, "already finalized") || strings.Contains(stderr, "already been finalized") {
 			return true
 		}
 		if verbose {
@@ -25,9 +25,15 @@ func FinalizeDB(dbDir string, verbose bool) bool {
 	return true
 }
 
+// InitDB creates a single-language database. sourceRoot is expected to be
+// already resolved by ResolveSourceRoot; callers must not pass a raw symlink,
+// or CodeQL will widen the extraction to the link targets' common ancestor.
 func InitDB(dbDir, lang, sourceRoot string, verbose bool) bool {
 	cmd := exec.Command("codeql", "database", "create", dbDir,
 		"--language="+lang, "--source-root", sourceRoot)
+	if verbose {
+		fmt.Printf("   cmd: %s\n", strings.Join(cmd.Args, " "))
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if verbose {

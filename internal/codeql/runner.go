@@ -36,6 +36,22 @@ func getDBLock(dbPath string) chan struct{} {
 func acquireDB(dbPath string) { <-getDBLock(dbPath) }
 func releaseDB(dbPath string) { getDBLock(dbPath) <- struct{}{} }
 
+// startProgress begins a progress line and returns a function that stops it,
+// blocking until the line has been cleared. Without that handshake the clear
+// sequence races the caller's next Printf and garbles the output.
+func startProgress(label string) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		progressTicker(label, stop)
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
 func progressTicker(label string, stop <-chan struct{}) {
 	start := time.Now()
 	ticker := time.NewTicker(5 * time.Second)
@@ -50,6 +66,28 @@ func progressTicker(label string, stop <-chan struct{}) {
 			fmt.Fprintf(os.Stderr, "\r  ⏳ %s … %ds elapsed", label, elapsed)
 		}
 	}
+}
+
+// CodeQLFormat maps HydraQL's --output-format to the value CodeQL's
+// `database analyze --format` actually accepts. CodeQL has no "sarif" or
+// "json" format: SARIF is requested as sarif-latest, and JSON is derived from
+// SARIF by the merge package.
+func CodeQLFormat(outputFormat string) string {
+	switch outputFormat {
+	case "csv":
+		return "csv"
+	default:
+		return "sarif-latest"
+	}
+}
+
+// ValidOutputFormat reports whether HydraQL knows how to produce the format.
+func ValidOutputFormat(outputFormat string) bool {
+	switch outputFormat {
+	case "csv", "json", "sarif":
+		return true
+	}
+	return false
 }
 
 // RunConfig holds per-query execution options.
@@ -69,6 +107,7 @@ type RunConfig struct {
 
 // QueryResult is the output of a single RunQuery call.
 type QueryResult struct {
+	Project  string
 	OutFile  string
 	Findings int
 	TimedOut bool
@@ -76,17 +115,25 @@ type QueryResult struct {
 }
 
 // RunQuery executes one CodeQL query with timeout, progress ticker, and retry.
-func RunQuery(ctx context.Context, query, lang, dbPath, tmpDir string, cfg *RunConfig) QueryResult {
+func RunQuery(ctx context.Context, query string, target ScanTarget, tmpDir string, cfg *RunConfig) QueryResult {
+	lang, dbPath := target.Lang, target.DBPath
+
+	// The project belongs in the temp filename: without it, two projects'
+	// results for the same query would overwrite each other in tmpDir.
 	stem := strings.TrimSuffix(filepath.Base(query), filepath.Ext(query))
-	outFile := filepath.Join(tmpDir, stem+"_"+lang+"."+cfg.OutputFormat)
-	label := fmt.Sprintf("[%s] %s", lang, filepath.Base(query))
+	parts := []string{stem}
+	if target.Project != "" {
+		parts = append(parts, sanitizeName(target.Project))
+	}
+	parts = append(parts, lang)
+	outFile := filepath.Join(tmpDir, strings.Join(parts, "_")+"."+cfg.OutputFormat)
+	label := fmt.Sprintf("[%s] %s", target.Label(), filepath.Base(query))
 
 	if cfg.Fancy {
 		fmt.Printf("%s🌐 %s%s\n", report.Cyan, label, report.Reset)
 	}
 
-	stop := make(chan struct{})
-	go progressTicker(label, stop)
+	stopProgress := startProgress(label)
 	tStart := time.Now()
 
 	var queryCtx context.Context
@@ -106,7 +153,7 @@ func RunQuery(ctx context.Context, query, lang, dbPath, tmpDir string, cfg *RunC
 		// Pre-query lock sweep
 		HandleCacheLocks(dbPath, cfg.UnlockCache, cfg.CheckLockProcess, cfg.KillLockProcess, cfg.Verbose)
 
-		ok, stderr, timedOut := analyzeOnce(queryCtx, query, dbPath, cfg.OutputFormat, outFile, cfg.Verbose)
+		ok, stderr, timedOut := analyzeOnce(queryCtx, query, dbPath, CodeQLFormat(cfg.OutputFormat), outFile, cfg.Verbose)
 
 		if timedOut {
 			elapsed := int(time.Since(tStart).Seconds())
@@ -135,7 +182,7 @@ func RunQuery(ctx context.Context, query, lang, dbPath, tmpDir string, cfg *RunC
 			}
 			if retried {
 				time.Sleep(250 * time.Millisecond)
-				ok, stderr, timedOut = analyzeOnce(queryCtx, query, dbPath, cfg.OutputFormat, outFile, cfg.Verbose)
+				ok, stderr, timedOut = analyzeOnce(queryCtx, query, dbPath, CodeQLFormat(cfg.OutputFormat), outFile, cfg.Verbose)
 				if timedOut {
 					elapsed := int(time.Since(tStart).Seconds())
 					appendLog("hydraql_failures.log", fmt.Sprintf("TIMEOUT after %ds: %s on %s\n", elapsed, query, lang))
@@ -170,7 +217,8 @@ func RunQuery(ctx context.Context, query, lang, dbPath, tmpDir string, cfg *RunC
 		return QueryResult{OutFile: outFile, Findings: findings}
 	}()
 
-	close(stop)
+	stopProgress()
+	result.Project = target.Project
 	return result
 }
 

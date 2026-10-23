@@ -37,7 +37,7 @@ func CountSARIF(path, severityFilter string, strict bool) int {
 	return count
 }
 
-func MergeSARIF(files []string, output, severityFilter string, strict bool) (int, error) {
+func MergeSARIF(files []Input, output, severityFilter string, strict bool) (int, error) {
 	merged := map[string]any{
 		"$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0.json",
 		"version": "2.1.0",
@@ -45,11 +45,11 @@ func MergeSARIF(files []string, output, severityFilter string, strict bool) (int
 	}
 	total := 0
 
-	for _, path := range files {
-		if path == "" {
+	for _, in := range files {
+		if in.Path == "" {
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(in.Path)
 		if err != nil {
 			continue
 		}
@@ -78,6 +78,7 @@ func MergeSARIF(files []string, output, severityFilter string, strict bool) (int
 				filtered = append(filtered, resMap)
 			}
 			newRun["results"] = filtered
+			tagRunProject(newRun, in.Project)
 			total += len(filtered)
 			existing, _ := merged["runs"].([]any)
 			merged["runs"] = append(existing, newRun)
@@ -92,6 +93,32 @@ func MergeSARIF(files []string, output, severityFilter string, strict bool) (int
 		return 0, err
 	}
 	return total, nil
+}
+
+// tagRunProject records which project a SARIF run came from. automationDetails.id
+// is what GitHub Code Scanning uses to keep runs from the same upload distinct,
+// and the properties bag keeps the label available to other consumers.
+func tagRunProject(run map[string]any, project string) {
+	if project == "" {
+		return
+	}
+	details, _ := run["automationDetails"].(map[string]any)
+	if details == nil {
+		details = map[string]any{}
+	} else {
+		details = shallowCopy(details)
+	}
+	details["id"] = project
+	run["automationDetails"] = details
+
+	props, _ := run["properties"].(map[string]any)
+	if props == nil {
+		props = map[string]any{}
+	} else {
+		props = shallowCopy(props)
+	}
+	props["hydraql"] = map[string]any{"project": project}
+	run["properties"] = props
 }
 
 func buildRuleSeverityMap(run map[string]any) map[string]string {
@@ -137,12 +164,7 @@ func resultMatchesSeverity(res map[string]any, rulesMap map[string]string, targe
 		candidates = append(candidates, strVal(props["severity"]), strVal(props["problem.severity"]))
 	}
 	// look up rule severity
-	ruleID := ""
-	if rid, ok := res["ruleId"].(string); ok {
-		ruleID = rid
-	} else if ruleObj, ok := res["rule"].(map[string]any); ok {
-		ruleID, _ = ruleObj["id"].(string)
-	}
+	ruleID := sarifRuleID(res)
 	if ruleID != "" {
 		if sev, ok := rulesMap[ruleID]; ok {
 			candidates = append(candidates, sev)
@@ -154,6 +176,50 @@ func resultMatchesSeverity(res map[string]any, rulesMap map[string]string, targe
 		}
 	}
 	return false
+}
+
+// sarifRuleID reads a result's rule identifier from either spelling.
+func sarifRuleID(res map[string]any) string {
+	if rid, ok := res["ruleId"].(string); ok && rid != "" {
+		return rid
+	}
+	if ruleObj, ok := res["rule"].(map[string]any); ok {
+		rid, _ := ruleObj["id"].(string)
+		return rid
+	}
+	return ""
+}
+
+// sarifMessageText reads result.message.text.
+func sarifMessageText(res map[string]any) string {
+	msg, _ := res["message"].(map[string]any)
+	if msg == nil {
+		return ""
+	}
+	return strVal(msg["text"])
+}
+
+// sarifLocation reads the first physical location's URI and start line.
+func sarifLocation(res map[string]any) (string, int) {
+	locs, _ := res["locations"].([]any)
+	if len(locs) == 0 {
+		return "", 0
+	}
+	loc, _ := locs[0].(map[string]any)
+	phys, _ := loc["physicalLocation"].(map[string]any)
+	if phys == nil {
+		return "", 0
+	}
+	artifact, _ := phys["artifactLocation"].(map[string]any)
+	uri := strVal(artifact["uri"])
+
+	line := 0
+	if region, ok := phys["region"].(map[string]any); ok {
+		if f, ok := region["startLine"].(float64); ok {
+			line = int(f)
+		}
+	}
+	return uri, line
 }
 
 func shallowCopy(m map[string]any) map[string]any {

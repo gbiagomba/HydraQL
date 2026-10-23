@@ -2,29 +2,55 @@ package report
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
-func PrintSummary(ran, total, timedOut int, perQueryCounts []int, fancy bool) {
+// Summary is the end-of-run tally. PerProject is keyed by project name and is
+// empty for the flat single-project layout.
+type Summary struct {
+	QueriesRun int
+	Findings   int
+	TimedOut   int
+	Databases  int
+	PerQuery   []int
+	PerProject map[string]int
+}
+
+func PrintSummary(s Summary, fancy bool) {
 	withResults := 0
-	for _, c := range perQueryCounts {
+	for _, c := range s.PerQuery {
 		if c > 0 {
 			withResults++
 		}
 	}
-	withoutResults := ran - withResults
+	withoutResults := len(s.PerQuery) - withResults
 
 	fmt.Println("\n🔎 Summary:\n───────────────────────────────")
-	fmt.Printf("Total queries run:       %d\n", ran)
-	fmt.Printf("Total findings:          %d\n", total)
-	if timedOut > 0 {
+	fmt.Printf("Databases scanned:       %d\n", s.Databases)
+	fmt.Printf("Total queries run:       %d\n", s.QueriesRun)
+	fmt.Printf("Total findings:          %d\n", s.Findings)
+	if s.TimedOut > 0 {
 		hint := " (use --no-timeout or increase --query-timeout)"
 		if fancy {
-			fmt.Printf("%sTimed out queries:       %d%s%s\n", Yellow, timedOut, hint, Reset)
+			fmt.Printf("%sTimed out queries:       %d%s%s\n", Yellow, s.TimedOut, hint, Reset)
 		} else {
-			fmt.Printf("Timed out queries:       %d%s\n", timedOut, hint)
+			fmt.Printf("Timed out queries:       %d%s\n", s.TimedOut, hint)
 		}
 	}
+
+	if len(s.PerProject) > 0 {
+		names := make([]string, 0, len(s.PerProject))
+		for name := range s.PerProject {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		fmt.Println("\nFindings by project:")
+		for _, name := range names {
+			fmt.Printf("  %-28s %d\n", name, s.PerProject[name])
+		}
+	}
+
 	ASCIIChart(withResults, withoutResults, fancy)
 }
 

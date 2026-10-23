@@ -22,3 +22,5 @@ legacy/
 # Output artifacts
 HydraQL_output-*
 hydraql_failures.log
+# CodeQL databases are large and are mounted at run time, never baked in
+cqlDB*/

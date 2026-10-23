@@ -51,6 +51,7 @@ tmp_*/
 *.bak
 
 # HydraQL-specific
+cqlDB*/
 tmp_hydraql_output/
 HydraQL_output-*.csv
 HydraQL_output-*.json

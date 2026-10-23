@@ -1,6 +1,7 @@
 // HydraQL — Parallel CodeQL Scanning Engine (Go edition)
-// Many-headed like the Hydra: runs CodeQL queries across multiple databases
-// and languages in parallel, merging results into CSV, JSON, or SARIF.
+// Many-headed like the Hydra: builds CodeQL databases, then runs queries across
+// multiple databases and languages in parallel, merging results into CSV, JSON,
+// or SARIF.
 package main
 
 import (
@@ -20,7 +21,9 @@ import (
 	"github.com/gbiagomba/hydraql/v2/internal/report"
 )
 
-const version = "2.1.6"
+// version is overridable at link time via -X main.version (see Makefile LDFLAGS),
+// so it must stay a var: -X cannot patch a const.
+var version = "2.2.0"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string
@@ -39,11 +42,13 @@ func (s *stringSliceFlag) Set(value string) error {
 func main() {
 	// ---- Flags (long and short) ----
 	var queryDirs stringSliceFlag
+	var sourceDirs stringSliceFlag
+	var excludes stringSliceFlag
 
 	langs := pflag.StringP("langs", "l", "java,javascript,typescript,python",
 		"Comma-separated languages to scan")
 	dbRoot := pflag.StringP("db-root", "d", "cqlDB",
-		"Root of CodeQL databases (expects <db-root>/<lang>/codeql-database.yml)")
+		"Root of CodeQL databases (<db-root>/<lang>/ or <db-root>/<project>/<lang>/)")
 	pflag.VarP(&queryDirs, "query-dir", "q",
 		"Query directory (repeat or comma-separate for multiple)")
 	threads := pflag.IntP("threads", "t", 6, "Parallel worker goroutines")
@@ -70,6 +75,21 @@ func main() {
 	sourceRoot := pflag.StringP("source-root", "r", "", "Source root for --auto-init-db")
 	forceScamUnready := pflag.BoolP("force-scan-unready", "R", false, "Scan DBs that appear empty/unusable")
 
+	// DB build phase
+	buildRoot := pflag.StringP("build-root", "b", "",
+		"Parent directory of project source dirs; build a DB per child, then scan")
+	pflag.Var(&sourceDirs, "source-dir",
+		"Explicit project source dir to build a DB for (repeat or comma-separate)")
+	dbPrefix := pflag.String("db-prefix", "", "Prefix for each project's DB directory name (e.g. cqlDB_eac-)")
+	pflag.Var(&excludes, "exclude",
+		"Glob of --build-root child names to skip (repeat or comma-separate; set to \"\" to disable)")
+	buildOnly := pflag.Bool("build-only", false, "Build and finalize databases, then exit without analyzing")
+	rebuildDB := pflag.Bool("rebuild-db", false, "Force rebuild of existing databases (codeql database create --overwrite)")
+	noResolveSymlinks := pflag.Bool("no-resolve-symlinks", false,
+		"Do not resolve symlinked source roots before handing them to CodeQL")
+	buildTimeout := pflag.Int("build-timeout", 0, "Per-database creation timeout in seconds (0 = no timeout)")
+	buildThreads := pflag.IntP("build-threads", "B", 1, "Concurrent database builds")
+
 	// Timeout
 	queryTimeout := pflag.IntP("query-timeout", "T", 600, "Per-query timeout in seconds (0 = no timeout)")
 	noTimeout := pflag.BoolP("no-timeout", "N", false, "Disable per-query timeout entirely")
@@ -93,29 +113,88 @@ func main() {
 		fmt.Println("HydraQL starting…")
 	}
 
-	// ---- Normalize query dirs ----
+	// ---- Normalize query dirs and languages ----
 	dirs := normalizeQueryDirs([]string(queryDirs))
+	langList := codeql.AliasLangs(strings.Split(*langs, ","))
+	if len(langList) == 0 {
+		fmt.Fprintln(os.Stderr, "No languages requested; exiting.")
+		os.Exit(1)
+	}
 
-	// ---- Normalize langs ----
-	var langList []string
-	for _, l := range strings.Split(*langs, ",") {
-		if l = strings.TrimSpace(l); l != "" {
-			langList = append(langList, codeql.LangAlias(l))
-		}
+	if !codeql.ValidOutputFormat(*outputFormat) {
+		fmt.Fprintf(os.Stderr, "Unknown --output-format %q; expected csv, json, or sarif.\n", *outputFormat)
+		os.Exit(1)
 	}
-	seen := map[string]bool{}
-	var uniqLangs []string
-	for _, l := range langList {
-		if !seen[l] {
-			seen[l] = true
-			uniqLangs = append(uniqLangs, l)
-		}
+
+	resolveSymlinks := !*noResolveSymlinks
+
+	// An unset --exclude gets the built-in list; passing the flag replaces it
+	// outright, and --exclude "" disables exclusion entirely.
+	excludeList := []string(excludes)
+	if !pflag.CommandLine.Changed("exclude") {
+		excludeList = codeql.DefaultExcludes
 	}
-	langList = uniqLangs
+
+	// The failures log is shared by the build and scan phases, so it is
+	// truncated once, before either runs.
+	_ = os.WriteFile("hydraql_failures.log", nil, 0644)
 
 	// ---- Pack install ----
 	if *packInstall {
 		installPacks(*fancy, *verbose)
+	}
+
+	// ---- Build phase ----
+	buildCfg := &codeql.BuildConfig{
+		BuildRoot:        *buildRoot,
+		SourceDirs:       []string(sourceDirs),
+		DBRoot:           *dbRoot,
+		DBPrefix:         *dbPrefix,
+		Exclude:          excludeList,
+		Langs:            langList,
+		ResolveSymlinks:  resolveSymlinks,
+		Rebuild:          *rebuildDB,
+		BuildTimeout:     *buildTimeout,
+		BuildThreads:     *buildThreads,
+		UnlockCache:      *unlockCache,
+		CheckLockProcess: *checkLockProc,
+		KillLockProcess:  *killLockProc,
+		DryRun:           *dryRun,
+		Verbose:          *verbose,
+		Fancy:            *fancy,
+	}
+
+	if buildCfg.Requested() {
+		fmt.Printf("[*] HydraQL discovering project source trees…\n")
+		projects, err := codeql.DiscoverProjects(buildCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		if len(projects) == 0 {
+			fmt.Fprintln(os.Stderr, "No project source directories found; exiting.")
+			os.Exit(1)
+		}
+		fmt.Printf("[*] Building %d database(s) under %s/ for %s\n",
+			len(projects), *dbRoot, strings.Join(langList, ","))
+
+		built := codeql.BuildDatabases(context.Background(), projects, buildCfg)
+
+		if *buildOnly {
+			if *dryRun {
+				fmt.Printf("Dry run: would build %d database(s).\n", len(projects))
+				os.Exit(0)
+			}
+			fmt.Printf("Built %d of %d database(s).\n", len(built), len(projects))
+			if len(built) < len(projects) {
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+		if !*dryRun && len(built) == 0 {
+			fmt.Fprintln(os.Stderr, "No databases were built successfully; exiting.")
+			os.Exit(1)
+		}
 	}
 
 	// ---- Detect databases ----
@@ -123,6 +202,7 @@ func main() {
 		AutoFinalizeDB:   *autoFinalizeDB,
 		AutoInitDB:       *autoInitDB,
 		SourceRoot:       *sourceRoot,
+		ResolveSymlinks:  resolveSymlinks,
 		AllowMissingDB:   *allowMissingDB,
 		ForceScamUnready: *forceScamUnready,
 		DryRun:           *dryRun,
@@ -132,11 +212,21 @@ func main() {
 		CheckLockProcess: *checkLockProc,
 		KillLockProcess:  *killLockProc,
 	}
-	foundDBs, ok := codeql.DetectDatabases(langList, *dbRoot, detectCfg)
+	targets, ok := codeql.DetectTargets(langList, *dbRoot, detectCfg)
 	if !ok {
+		// A dry run with a build phase has nothing on disk yet; the printed
+		// build plan was the point of the run.
+		if *dryRun && buildCfg.Requested() {
+			fmt.Println("Dry run complete (databases were not created, so none could be detected).")
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
-	if len(foundDBs) == 0 {
+	if len(targets) == 0 {
+		if *dryRun && buildCfg.Requested() {
+			fmt.Println("Dry run complete (databases were not created, so none could be detected).")
+			os.Exit(0)
+		}
 		fmt.Println("No valid databases found; exiting.")
 		os.Exit(1)
 	}
@@ -157,7 +247,8 @@ func main() {
 	}
 
 	if *fancy {
-		fmt.Printf("%s[*]%s Found %d queries to run\n", report.Magenta, report.Reset, len(pairs))
+		fmt.Printf("%s[*]%s Found %d queries across %d database(s)\n",
+			report.Magenta, report.Reset, len(pairs), len(targets))
 	}
 
 	// ---- Parallel execution ----
@@ -166,7 +257,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to create tmp dir: %v\n", err)
 		os.Exit(1)
 	}
-	_ = os.WriteFile("hydraql_failures.log", nil, 0644)
 
 	runCfg := &codeql.RunConfig{
 		Verbose:          *verbose,
@@ -182,35 +272,26 @@ func main() {
 		OutputFormat:     *outputFormat,
 	}
 
-	type result struct {
-		outFile  string
-		findings int
-		timedOut bool
-	}
-
-	results := make(chan result, len(pairs))
+	results := make(chan codeql.QueryResult, len(pairs)*len(targets))
 	workerSem := make(chan struct{}, *threads)
 	ctx := context.Background()
 
+	queued := 0
 	var wg sync.WaitGroup
-	for _, pair := range pairs {
-		dbPath, exists := foundDBs[pair.Lang]
-		if !exists {
-			if *verbose {
-				fmt.Printf("%s⚠️  Skipping %s — no DB for %s%s\n",
-					report.Yellow, pair.Query, pair.Lang, report.Reset)
+	for _, target := range targets {
+		for _, pair := range pairs {
+			if pair.Lang != target.Lang {
+				continue
 			}
-			continue
+			queued++
+			wg.Add(1)
+			go func(q codeql.QueryPair, t codeql.ScanTarget) {
+				defer wg.Done()
+				workerSem <- struct{}{}
+				defer func() { <-workerSem }()
+				results <- codeql.RunQuery(ctx, q.Query, t, tmpDir, runCfg)
+			}(pair, target)
 		}
-		wg.Add(1)
-		go func(q codeql.QueryPair, db string) {
-			defer wg.Done()
-			workerSem <- struct{}{}
-			defer func() { <-workerSem }()
-
-			r := codeql.RunQuery(ctx, q.Query, q.Lang, db, tmpDir, runCfg)
-			results <- result{r.OutFile, r.Findings, r.TimedOut}
-		}(pair, dbPath)
 	}
 
 	go func() {
@@ -218,17 +299,21 @@ func main() {
 		close(results)
 	}()
 
-	var outFiles []string
+	var inputs []merge.Input
 	var perQueryCounts []int
+	perProject := map[string]int{}
 	timedOutCount := 0
 	for r := range results {
-		if r.timedOut {
+		if r.TimedOut {
 			timedOutCount++
 		}
-		if r.outFile != "" {
-			outFiles = append(outFiles, r.outFile)
+		if r.OutFile != "" {
+			inputs = append(inputs, merge.Input{Path: r.OutFile, Project: r.Project})
 		}
-		perQueryCounts = append(perQueryCounts, r.findings)
+		if r.Project != "" {
+			perProject[r.Project] += r.Findings
+		}
+		perQueryCounts = append(perQueryCounts, r.Findings)
 	}
 
 	// ---- Merge results ----
@@ -239,11 +324,11 @@ func main() {
 	var mergeErr error
 	switch *outputFormat {
 	case "csv":
-		total, mergeErr = merge.MergeCSV(outFiles, outputFile, *severityFilter, *strictSeverity)
+		total, mergeErr = merge.MergeCSV(inputs, outputFile, *severityFilter, *strictSeverity)
 	case "json":
-		total, mergeErr = merge.MergeJSON(outFiles, outputFile, *severityFilter, *strictSeverity)
+		total, mergeErr = merge.MergeJSON(inputs, outputFile, *severityFilter, *strictSeverity)
 	default:
-		total, mergeErr = merge.MergeSARIF(outFiles, outputFile, *severityFilter, *strictSeverity)
+		total, mergeErr = merge.MergeSARIF(inputs, outputFile, *severityFilter, *strictSeverity)
 	}
 	if mergeErr != nil {
 		fmt.Fprintf(os.Stderr, "Merge error: %v\n", mergeErr)
@@ -251,7 +336,14 @@ func main() {
 	}
 
 	// ---- Summary ----
-	report.PrintSummary(len(pairs), total, timedOutCount, perQueryCounts, *fancy)
+	report.PrintSummary(report.Summary{
+		QueriesRun: queued,
+		Findings:   total,
+		TimedOut:   timedOutCount,
+		Databases:  len(targets),
+		PerQuery:   perQueryCounts,
+		PerProject: perProject,
+	}, *fancy)
 
 	if *fancy {
 		if total > 0 {
@@ -274,15 +366,9 @@ func normalizeQueryDirs(raw []string) []string {
 	var out []string
 	for _, entry := range raw {
 		for _, tok := range strings.Split(entry, ",") {
-			tok = strings.TrimSpace(tok)
-			if tok == "" {
-				continue
+			if tok = strings.TrimSpace(tok); tok != "" {
+				out = append(out, codeql.ExpandHome(tok))
 			}
-			if strings.HasPrefix(tok, "~") {
-				home, _ := os.UserHomeDir()
-				tok = filepath.Join(home, tok[1:])
-			}
-			out = append(out, tok)
 		}
 	}
 	return out
