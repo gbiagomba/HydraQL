@@ -2,6 +2,16 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.3.0] - 2026-10-23
+### Added
+- **`--build-command`**: the passthrough for `codeql database create --command`, needed by compiled languages (Java/Kotlin, C/C++, C#, Swift, Go). Repeat the flag for several commands; they are forwarded in order. It is a string array rather than a comma-split list, so a command containing a comma survives intact.
+- **`--build-mode`**: passthrough for `codeql database create --build-mode`, accepting `none`, `autobuild`, or `manual`. Specifying a build command already implies manual mode, so the two are rarely needed together. An unknown mode, and the contradictory `--build-mode none` with a `--build-command`, are both rejected before any work starts.
+- `BUILD_COMMAND` and `BUILD_MODE` Makefile variables.
+- Both options also apply to the single-language `--auto-init-db` path, not just the cluster build.
+
+### Fixed
+- **`--source-dir .` produced a project named `project`.** The name was taken from the basename of the literal argument, which is empty for `.`, so it fell through to the generic fallback. Names are now derived from the resolved absolute path, making `--source-dir .` name the database after the directory it points at.
+
 ## [2.2.0] - 2026-10-23
 ### Added
 - **One-stop build and scan** (`-b` / `--build-root`, `--source-dir`): HydraQL now creates the CodeQL databases it scans. For each project source directory it runs `codeql database create --db-cluster`, finalizes every language database in the cluster, then scans the result. This replaces the manual `codeql database create` and `codeql database finalize` shell loops.

@@ -39,6 +39,7 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
 - 🧩 Multiple query directories (comma-separated or repeated `-q`)
 - 🐍 Language aliasing (TypeScript→JavaScript, Kotlin→Java, Go→Go)
 - 🏗️ **One-stop build and scan** (`-b` / `--build-root`): creates a database cluster per project source dir, finalizes it, then scans it. No separate `codeql database create` / `finalize` loops
+- 🔨 **Build commands for compiled languages** (`--build-command`, `--build-mode`): passthrough to CodeQL's `--command`, so Java/Kotlin, C/C++, C#, and Swift build as part of the same run
 - 🔗 **Symlink resolution** (on by default): a symlinked source root is resolved to its real target before CodeQL sees it, so extraction stays scoped to the linked subtree instead of widening to the link targets' common ancestor
 - 🗂️ **Multi-database scanning**: one run fans out across every project under `--db-root`, and findings carry the project they came from
 - 🛡️ Database preflight: presence, finalization, structure, and emptiness checks
@@ -130,7 +131,8 @@ make scan-high           # SEVERITY=HIGH
 ```
 
 Build-phase variables: `BUILD_ROOT`, `SOURCE_DIRS`, `DB_PREFIX`, `EXCLUDE`,
-`REBUILD_DB=1`, `RESOLVE_SYMLINKS=0`, `BUILD_TIMEOUT`, `BUILD_THREADS`.
+`REBUILD_DB=1`, `RESOLVE_SYMLINKS=0`, `BUILD_COMMAND`, `BUILD_MODE`,
+`BUILD_TIMEOUT`, `BUILD_THREADS`.
 Scan variables: `DB_ROOT`, `LANGS`, `QUERY_DIRS`, `FORMAT`, `THREADS`,
 `SEVERITY`, `STRICT`, `FANCY`, `VERBOSE`, `DRY_RUN`, `ALLOW_MISSING`,
 `SUITE_ONLY`, `PACK_INSTALL`, `UNLOCK_CACHE`, `CHECK_LOCK_PROC`,
@@ -229,6 +231,42 @@ Directories that are never source projects (`node_modules`, `dist`, `build`,
 `reports`, and similar) are skipped by default. Pass `--exclude` to replace that
 list, or `--exclude ""` to disable it.
 
+#### Compiled languages
+
+JavaScript/TypeScript, Python, and Ruby extract without being built. Java and
+Kotlin, C/C++, C#, Swift, and Go generally need the compiler to run, which is
+what `--build-command` is for; it maps straight onto CodeQL's `--command`:
+
+```bash
+hydraql --source-dir . -d . --db-prefix cqlDB_ \
+  -l "javascript,typescript,python,kotlin,cpp,swift" \
+  --build-command "./build.sh" --rebuild-db --build-only
+```
+
+That produces exactly one cluster, `./cqlDB_<dirname>/<lang>/`, and runs:
+
+```
+codeql database create cqlDB_<dirname> --db-cluster \
+  --language=javascript,python,java,cpp,swift \
+  --source-root=<resolved dir> --command=./build.sh --overwrite
+```
+
+Note what HydraQL normalized: `typescript` folded into `javascript` and
+`kotlin` into `java`, matching CodeQL's actual extractor set. In a mixed
+cluster the command runs once under tracing for the compiled languages, while
+the interpreted ones extract from source regardless.
+
+Repeat `--build-command` for a multi-step build; the commands are forwarded in
+order. `--build-mode` (`none`, `autobuild`, `manual`) is also available, though
+supplying a command already implies `manual`, so the two are rarely combined.
+`--build-mode none` together with `--build-command` is rejected outright, since
+that mode never builds the source root.
+
+**The command's working directory is the resolved source root.** Because
+symlinks are resolved first, a `build.sh` sitting next to a *symlink* is not
+next to the directory CodeQL ends up in. Reference the script by a path that
+exists inside the real tree, or pass `--no-resolve-symlinks`.
+
 ### Flag Reference
 
 All flags support both a short form (`-X`) and the traditional long form (`--flag-name`).
@@ -262,6 +300,8 @@ All flags support both a short form (`-X`) and the traditional long form (`--fla
 |       | `--build-only`          | `false`   | Build and finalize databases, then exit without analyzing |
 |       | `--rebuild-db`          | `false`   | Force rebuild of existing DBs (`database create --overwrite`) |
 |       | `--no-resolve-symlinks` | `false`   | Do not resolve symlinked source roots before CodeQL sees them |
+|       | `--build-command`       | _(none)_  | Build command for compiled languages, as codeql `--command` (repeat for several) |
+|       | `--build-mode`          | _(none)_  | CodeQL build mode: `none`, `autobuild`, or `manual`    |
 |       | `--build-timeout`       | `0`       | Per-database creation timeout in seconds (`0` = none)  |
 | `-B`  | `--build-threads`       | `1`       | Concurrent database builds                             |
 | `-T`  | `--query-timeout`       | `600`     | Per-query timeout in seconds (`0` = no timeout)        |
@@ -365,8 +405,8 @@ On a `v*` tag push:
 
 To publish a release:
 ```bash
-git tag -a v2.2.0 -m "Release v2.2.0"
-git push origin v2.2.0
+git tag -a v2.3.0 -m "Release v2.3.0"
+git push origin v2.3.0
 ```
 
 Docker Hub publishing requires `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets set in the repository settings.

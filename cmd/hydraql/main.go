@@ -23,7 +23,7 @@ import (
 
 // version is overridable at link time via -X main.version (see Makefile LDFLAGS),
 // so it must stay a var: -X cannot patch a const.
-var version = "2.2.0"
+var version = "2.3.0"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string
@@ -44,6 +44,7 @@ func main() {
 	var queryDirs stringSliceFlag
 	var sourceDirs stringSliceFlag
 	var excludes stringSliceFlag
+	var buildCommands []string
 
 	langs := pflag.StringP("langs", "l", "java,javascript,typescript,python",
 		"Comma-separated languages to scan")
@@ -87,6 +88,12 @@ func main() {
 	rebuildDB := pflag.Bool("rebuild-db", false, "Force rebuild of existing databases (codeql database create --overwrite)")
 	noResolveSymlinks := pflag.Bool("no-resolve-symlinks", false,
 		"Do not resolve symlinked source roots before handing them to CodeQL")
+	// StringArrayVar, not the comma-splitting slice: a build command may well
+	// contain a comma, and splitting it would silently corrupt the command.
+	pflag.StringArrayVar(&buildCommands, "build-command", nil,
+		"Build command for compiled languages, as codeql --command (repeat for several)")
+	buildMode := pflag.String("build-mode", "",
+		"CodeQL build mode: none, autobuild, or manual (default: let CodeQL decide)")
 	buildTimeout := pflag.Int("build-timeout", 0, "Per-database creation timeout in seconds (0 = no timeout)")
 	buildThreads := pflag.IntP("build-threads", "B", 1, "Concurrent database builds")
 
@@ -126,6 +133,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	createOpts := codeql.CreateOptions{
+		BuildMode:     *buildMode,
+		BuildCommands: buildCommands,
+	}
+	if err := createOpts.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
 	resolveSymlinks := !*noResolveSymlinks
 
 	// An unset --exclude gets the built-in list; passing the flag replaces it
@@ -152,6 +168,7 @@ func main() {
 		DBPrefix:         *dbPrefix,
 		Exclude:          excludeList,
 		Langs:            langList,
+		CreateOptions:    createOpts,
 		ResolveSymlinks:  resolveSymlinks,
 		Rebuild:          *rebuildDB,
 		BuildTimeout:     *buildTimeout,
@@ -202,6 +219,7 @@ func main() {
 		AutoFinalizeDB:   *autoFinalizeDB,
 		AutoInitDB:       *autoInitDB,
 		SourceRoot:       *sourceRoot,
+		CreateOptions:    createOpts,
 		ResolveSymlinks:  resolveSymlinks,
 		AllowMissingDB:   *allowMissingDB,
 		ForceScamUnready: *forceScamUnready,

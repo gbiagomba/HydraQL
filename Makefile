@@ -1,5 +1,5 @@
 # ===== HydraQL Makefile =====
-VERSION       ?= 2.2.0
+VERSION       ?= 2.3.0
 
 # ---- Go ----
 GO            ?= go
@@ -47,6 +47,8 @@ REBUILD_DB        ?= 0
 RESOLVE_SYMLINKS  ?= 1
 BUILD_TIMEOUT     ?= 0
 BUILD_THREADS     ?= 1
+BUILD_COMMAND     ?=
+BUILD_MODE        ?=
 
 # ---- Docker ----
 IMAGE         ?= hydraql:latest
@@ -126,6 +128,12 @@ endif
 ifeq ($(RESOLVE_SYMLINKS),0)
   NO_RESOLVE_FLAG := --no-resolve-symlinks
 endif
+ifneq ($(strip $(BUILD_COMMAND)),)
+  BUILD_COMMAND_FLAG := --build-command "$(BUILD_COMMAND)"
+endif
+ifneq ($(strip $(BUILD_MODE)),)
+  BUILD_MODE_FLAG := --build-mode "$(BUILD_MODE)"
+endif
 
 COMMON_FLAGS := \
   --db-root "$(DB_ROOT)" \
@@ -156,6 +164,8 @@ BUILD_FLAGS := \
   $(EXCLUDE_FLAG) \
   $(REBUILD_FLAG) \
   $(NO_RESOLVE_FLAG) \
+  $(BUILD_COMMAND_FLAG) \
+  $(BUILD_MODE_FLAG) \
   --build-timeout $(BUILD_TIMEOUT) \
   --build-threads $(BUILD_THREADS)
 
@@ -190,6 +200,10 @@ help:
 	@echo ""
 	@echo "   Source roots are resolved through their symlinks by default."
 	@echo "   Set RESOLVE_SYMLINKS=0 to disable, REBUILD_DB=1 to force --overwrite."
+	@echo ""
+	@echo "   Compiled languages need a build command:"
+	@echo "     make all BUILD_ROOT=. DB_ROOT=./cqlDB LANGS=java,cpp \\"
+	@echo "       BUILD_COMMAND=./build.sh"
 	@echo ""
 	@echo "=== Run (Python legacy, v1.8.0 feature level) ==="
 	@echo " make run                        # run legacy/hydraql.py"

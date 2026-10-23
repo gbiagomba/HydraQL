@@ -97,6 +97,7 @@ type DetectConfig struct {
 	AutoFinalizeDB   bool
 	AutoInitDB       bool
 	SourceRoot       string
+	CreateOptions    CreateOptions
 	ResolveSymlinks  bool
 	AllowMissingDB   bool
 	ForceScamUnready bool
@@ -153,7 +154,7 @@ func (s *detectState) consider(project, lang, dbDir string, cfg *DetectConfig, i
 				return false
 			}
 			fmt.Printf("  → Creating DB for %s at %s (source %s)\n", lang, dbDir, sourceRoot)
-			if !cfg.DryRun && !InitDB(dbDir, lang, sourceRoot, cfg.Verbose) {
+			if !cfg.DryRun && !InitDB(dbDir, lang, sourceRoot, cfg.CreateOptions, cfg.Verbose) {
 				if !cfg.AllowMissingDB {
 					return false
 				}

@@ -251,3 +251,130 @@ func TestValidOutputFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateOptionsArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		opts CreateOptions
+		want []string
+	}{
+		{"empty", CreateOptions{}, nil},
+		{"mode only", CreateOptions{BuildMode: "autobuild"}, []string{"--build-mode=autobuild"}},
+		{
+			"single command",
+			CreateOptions{BuildCommands: []string{"./build.sh"}},
+			[]string{"--command=./build.sh"},
+		},
+		{
+			// A command containing a comma must survive intact, which is why
+			// the flag is a string array rather than a comma-split slice.
+			"command with comma and spaces",
+			CreateOptions{BuildCommands: []string{"make a,b -j4"}},
+			[]string{"--command=make a,b -j4"},
+		},
+		{
+			"several commands keep their order",
+			CreateOptions{BuildCommands: []string{"./configure", "make"}},
+			[]string{"--command=./configure", "--command=make"},
+		},
+		{
+			"manual mode with command",
+			CreateOptions{BuildMode: "manual", BuildCommands: []string{"./build.sh"}},
+			[]string{"--build-mode=manual", "--command=./build.sh"},
+		},
+	}
+	for _, tc := range cases {
+		got := tc.opts.args()
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: args() = %v, want %v", tc.name, got, tc.want)
+			continue
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s: args() = %v, want %v", tc.name, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
+func TestCreateOptionsValidate(t *testing.T) {
+	ok := []CreateOptions{
+		{},
+		{BuildMode: "none"},
+		{BuildMode: "autobuild"},
+		{BuildMode: "manual", BuildCommands: []string{"./build.sh"}},
+		{BuildCommands: []string{"./build.sh"}}, // a command implies manual
+	}
+	for _, o := range ok {
+		if err := o.Validate(); err != nil {
+			t.Errorf("Validate(%+v) = %v, want nil", o, err)
+		}
+	}
+
+	bad := []CreateOptions{
+		{BuildMode: "autobuilt"},
+		{BuildMode: "NONE"}, // CodeQL's values are lowercase
+		// Build mode none does not build the source root, so a build command
+		// could never run.
+		{BuildMode: "none", BuildCommands: []string{"./build.sh"}},
+	}
+	for _, o := range bad {
+		if err := o.Validate(); err == nil {
+			t.Errorf("Validate(%+v) = nil, want an error", o)
+		}
+	}
+}
+
+// The languages in the user's real invocation: typescript collapses into
+// javascript and kotlin into java, both of which match CodeQL's own extractor
+// set, and the trailing empty entry from a dangling comma is dropped.
+func TestAliasLangsMixedCompiledAndInterpreted(t *testing.T) {
+	got := AliasLangs([]string{"javascript", "typescript", "python", "kotlin", "cpp", "swift", ""})
+	want := []string{"javascript", "python", "java", "cpp", "swift"}
+	if len(got) != len(want) {
+		t.Fatalf("AliasLangs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("AliasLangs = %v, want %v", got, want)
+		}
+	}
+}
+
+// "--source-dir ." must be named after the directory it points at. Taking the
+// basename of the literal "." yields nothing and used to fall back to the
+// generic "project".
+func TestDiscoverProjectsNamesDotSourceDirAfterItsDirectory(t *testing.T) {
+	buildRoot, _ := fixture(t)
+	target := filepath.Join(buildRoot, "a")
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(target); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	cfg := &BuildConfig{
+		SourceDirs:      []string{"."},
+		DBRoot:          "cqlDB",
+		Langs:           []string{"javascript"},
+		ResolveSymlinks: true,
+	}
+	projects, err := DiscoverProjects(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("discovered %d projects, want 1", len(projects))
+	}
+	if projects[0].Name != "a" {
+		t.Errorf("Name = %q, want %q", projects[0].Name, "a")
+	}
+	if projects[0].DBPath != filepath.Join("cqlDB", "a") {
+		t.Errorf("DBPath = %q, want %q", projects[0].DBPath, filepath.Join("cqlDB", "a"))
+	}
+}

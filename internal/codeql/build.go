@@ -39,6 +39,53 @@ var DefaultExcludes = []string{
 	"reports", "report", "coverage", "tmp", "temp",
 }
 
+// CreateOptions carries the `codeql database create` settings that control how
+// the source tree is built. It is the single owner of that flag translation,
+// shared by the cluster build phase and the single-language --auto-init-db path.
+type CreateOptions struct {
+	BuildMode     string   // none | autobuild | manual; empty lets CodeQL decide
+	BuildCommands []string // each becomes a --command=<cmd>
+}
+
+// ValidBuildModes are the modes `codeql database create --build-mode` accepts.
+var ValidBuildModes = []string{"none", "autobuild", "manual"}
+
+// Validate rejects a mode CodeQL would not accept and the one contradictory
+// combination: a build command cannot run under build mode "none".
+func (o CreateOptions) Validate() error {
+	if o.BuildMode != "" {
+		ok := false
+		for _, m := range ValidBuildModes {
+			if o.BuildMode == m {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return fmt.Errorf("unknown --build-mode %q; expected one of %s",
+				o.BuildMode, strings.Join(ValidBuildModes, ", "))
+		}
+	}
+	if o.BuildMode == "none" && len(o.BuildCommands) > 0 {
+		return fmt.Errorf("--build-command cannot be used with --build-mode none, " +
+			"because that mode does not build the source root")
+	}
+	return nil
+}
+
+// args renders the options as `codeql database create` arguments. Specifying a
+// command already implies manual build mode, so no mode is added for it.
+func (o CreateOptions) args() []string {
+	var out []string
+	if o.BuildMode != "" {
+		out = append(out, "--build-mode="+o.BuildMode)
+	}
+	for _, cmd := range o.BuildCommands {
+		out = append(out, "--command="+cmd)
+	}
+	return out
+}
+
 // Project is one source tree that gets its own CodeQL database cluster.
 type Project struct {
 	Name       string // sanitized basename of the entry as presented
@@ -54,6 +101,8 @@ type BuildConfig struct {
 	DBRoot     string
 	DBPrefix   string
 	Langs      []string // already passed through LangAlias and deduped
+
+	CreateOptions
 
 	Exclude         []string // globs matched against build-root child names
 	ResolveSymlinks bool
@@ -231,9 +280,17 @@ func DiscoverProjects(cfg *BuildConfig) ([]Project, error) {
 			continue
 		}
 
-		// The name comes from the entry as presented, not from the resolved
-		// target: "pdf-export-core" is a better label than "export-core".
-		name := sanitizeName(filepath.Base(c.path))
+		abs, err := filepath.Abs(ExpandHome(c.path))
+		if err != nil {
+			fmt.Printf("  %s⚠️  Skipping %s: %v%s\n", report.Yellow, c.path, err, report.Reset)
+			continue
+		}
+
+		// The name comes from the entry as presented rather than the resolved
+		// target ("pdf-export-core" is a better label than "export-core"), but
+		// from its absolute form, so that "--source-dir ." is named after the
+		// directory instead of degenerating to the "." basename.
+		name := sanitizeName(filepath.Base(abs))
 		if used[name] {
 			for i := 2; ; i++ {
 				alt := fmt.Sprintf("%s-%d", name, i)
@@ -245,7 +302,6 @@ func DiscoverProjects(cfg *BuildConfig) ([]Project, error) {
 		}
 		used[name] = true
 
-		abs, _ := filepath.Abs(ExpandHome(c.path))
 		p := Project{
 			Name:       name,
 			RawPath:    abs,
@@ -362,6 +418,7 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) bool {
 		"--language=" + langArg,
 		"--source-root=" + p.SourceRoot,
 	}
+	args = append(args, cfg.CreateOptions.args()...)
 	if cfg.Rebuild {
 		args = append(args, "--overwrite")
 	}
