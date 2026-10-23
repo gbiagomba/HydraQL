@@ -2,6 +2,17 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.4.0] - 2026-10-23
+### Added
+- **`--output-format` accepts several formats**, comma-separated, with `all` as a shorthand for `csv,json,sarif`. Each writes its own `HydraQL_output-<timestamp>.<ext>`, sharing one timestamp, and the run header reports how many CodeQL passes the request costs.
+
+  `codeql database analyze --format` takes a single value, so the formats are grouped by the CodeQL pass that feeds them. JSON is reshaped from SARIF, so `json,sarif` costs one pass; CSV needs its own, so `all` costs two. The summary counts the first requested format, since every pass finds the same results.
+
+  CSV is deliberately **not** derived from SARIF. Testing the two against each other over 68 findings turned up five classes of divergence: CodeQL's CSV writer normalizes whitespace in multi-line `@description` blocks, anchors paths with a leading `/`, converts SARIF's exclusive `endColumn` to an inclusive one, restores the `startColumn`/`endLine` values SARIF omits at their defaults, and rewrites message links from SARIF's `[text](index)` into its own `[["text"|"relative:///path:line:col:line:col"]]` form against `relatedLocations`. Reproducing all of that would be reimplementing CodeQL's CSV writer against undocumented conventions, so the second pass is the honest cost.
+
+### Changed
+- `RunQuery` takes the CodeQL format for the pass it is running, and `QueryResult` records it, so each report merges only the files written in its own format. `RunConfig.OutputFormat` is gone.
+
 ## [2.3.0] - 2026-10-23
 ### Added
 - **`--build-command`**: the passthrough for `codeql database create --command`, needed by compiled languages (Java/Kotlin, C/C++, C#, Swift, Go). Repeat the flag for several commands; they are forwarded in order. It is a string array rather than a comma-split list, so a command containing a comma survives intact.

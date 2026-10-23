@@ -23,7 +23,7 @@ import (
 
 // version is overridable at link time via -X main.version (see Makefile LDFLAGS),
 // so it must stay a var: -X cannot patch a const.
-var version = "2.3.0"
+var version = "2.4.0"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string
@@ -55,7 +55,8 @@ func main() {
 	threads := pflag.IntP("threads", "t", 6, "Parallel worker goroutines")
 	pflag.IntVar(threads, "parallel", 6, "")
 	_ = pflag.CommandLine.MarkHidden("parallel")
-	outputFormat := pflag.StringP("output-format", "o", "csv", "Output format: csv, json, sarif")
+	outputFormat := pflag.StringP("output-format", "o", "csv",
+		"Output formats: csv, json, sarif; comma-separate for several, or \"all\"")
 	severityFilter := pflag.StringP("severity", "s", "", "Filter findings by severity (e.g. HIGH, CRITICAL)")
 	strictSeverity := pflag.BoolP("strict-severity", "S", false, "Exact severity match only (no loose mapping)")
 	fancy := pflag.BoolP("fancy", "f", false, "Colored output and ASCII chart")
@@ -128,8 +129,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	if !codeql.ValidOutputFormat(*outputFormat) {
-		fmt.Fprintf(os.Stderr, "Unknown --output-format %q; expected csv, json, or sarif.\n", *outputFormat)
+	outputPlan, err := codeql.NewOutputPlan(*outputFormat)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 
@@ -265,8 +267,8 @@ func main() {
 	}
 
 	if *fancy {
-		fmt.Printf("%s[*]%s Found %d queries across %d database(s)\n",
-			report.Magenta, report.Reset, len(pairs), len(targets))
+		fmt.Printf("%s[*]%s Found %d queries across %d database(s); output: %s\n",
+			report.Magenta, report.Reset, len(pairs), len(targets), outputPlan.Describe())
 	}
 
 	// ---- Parallel execution ----
@@ -287,28 +289,32 @@ func main() {
 		KillLockProcess:  *killLockProc,
 		SeverityFilter:   *severityFilter,
 		StrictSeverity:   *strictSeverity,
-		OutputFormat:     *outputFormat,
 	}
 
-	results := make(chan codeql.QueryResult, len(pairs)*len(targets))
+	codeqlFormats := outputPlan.CodeQLFormats()
+	results := make(chan codeql.QueryResult, len(pairs)*len(targets)*len(codeqlFormats))
 	workerSem := make(chan struct{}, *threads)
 	ctx := context.Background()
 
-	queued := 0
+	// Each requested CodeQL format is its own analyze pass, because
+	// `database analyze --format` takes a single value.
+	queries := 0
 	var wg sync.WaitGroup
 	for _, target := range targets {
 		for _, pair := range pairs {
 			if pair.Lang != target.Lang {
 				continue
 			}
-			queued++
-			wg.Add(1)
-			go func(q codeql.QueryPair, t codeql.ScanTarget) {
-				defer wg.Done()
-				workerSem <- struct{}{}
-				defer func() { <-workerSem }()
-				results <- codeql.RunQuery(ctx, q.Query, t, tmpDir, runCfg)
-			}(pair, target)
+			queries++
+			for _, cf := range codeqlFormats {
+				wg.Add(1)
+				go func(q codeql.QueryPair, t codeql.ScanTarget, cf string) {
+					defer wg.Done()
+					workerSem <- struct{}{}
+					defer func() { <-workerSem }()
+					results <- codeql.RunQuery(ctx, q.Query, t, cf, tmpDir, runCfg)
+				}(pair, target, cf)
+			}
 		}
 	}
 
@@ -317,16 +323,24 @@ func main() {
 		close(results)
 	}()
 
-	var inputs []merge.Input
+	// Group each pass's per-query files so every report merges only the files
+	// written in its own format.
+	inputsByPass := map[string][]merge.Input{}
 	var perQueryCounts []int
 	perProject := map[string]int{}
 	timedOutCount := 0
+	primaryPass := codeql.CodeQLFormat(outputPlan.Primary())
 	for r := range results {
+		if r.OutFile != "" {
+			inputsByPass[r.CodeQLFormat] = append(inputsByPass[r.CodeQLFormat],
+				merge.Input{Path: r.OutFile, Project: r.Project})
+		}
+		// Every pass finds the same things, so the summary counts one of them.
+		if r.CodeQLFormat != primaryPass {
+			continue
+		}
 		if r.TimedOut {
 			timedOutCount++
-		}
-		if r.OutFile != "" {
-			inputs = append(inputs, merge.Input{Path: r.OutFile, Project: r.Project})
 		}
 		if r.Project != "" {
 			perProject[r.Project] += r.Findings
@@ -334,43 +348,55 @@ func main() {
 		perQueryCounts = append(perQueryCounts, r.Findings)
 	}
 
-	// ---- Merge results ----
+	// ---- Merge results, one report per requested format ----
 	ts := time.Now().Format("20060102150405")
-	outputFile := fmt.Sprintf("HydraQL_output-%s.%s", ts, *outputFormat)
+	totals := map[string]int{}
+	var outputFiles []string
 
-	var total int
-	var mergeErr error
-	switch *outputFormat {
-	case "csv":
-		total, mergeErr = merge.MergeCSV(inputs, outputFile, *severityFilter, *strictSeverity)
-	case "json":
-		total, mergeErr = merge.MergeJSON(inputs, outputFile, *severityFilter, *strictSeverity)
-	default:
-		total, mergeErr = merge.MergeSARIF(inputs, outputFile, *severityFilter, *strictSeverity)
-	}
-	if mergeErr != nil {
-		fmt.Fprintf(os.Stderr, "Merge error: %v\n", mergeErr)
-		os.Exit(1)
+	for _, format := range outputPlan.Formats() {
+		outputFile := fmt.Sprintf("HydraQL_output-%s.%s", ts, format)
+		inputs := inputsByPass[codeql.CodeQLFormat(format)]
+
+		var total int
+		var mergeErr error
+		switch format {
+		case "csv":
+			total, mergeErr = merge.MergeCSV(inputs, outputFile, *severityFilter, *strictSeverity)
+		case "json":
+			total, mergeErr = merge.MergeJSON(inputs, outputFile, *severityFilter, *strictSeverity)
+		default:
+			total, mergeErr = merge.MergeSARIF(inputs, outputFile, *severityFilter, *strictSeverity)
+		}
+		if mergeErr != nil {
+			fmt.Fprintf(os.Stderr, "Merge error for %s: %v\n", format, mergeErr)
+			os.Exit(1)
+		}
+		totals[format] = total
+		outputFiles = append(outputFiles, outputFile)
 	}
 
 	// ---- Summary ----
 	report.PrintSummary(report.Summary{
-		QueriesRun: queued,
-		Findings:   total,
+		QueriesRun: queries,
+		Findings:   totals[outputPlan.Primary()],
 		TimedOut:   timedOutCount,
 		Databases:  len(targets),
 		PerQuery:   perQueryCounts,
 		PerProject: perProject,
 	}, *fancy)
 
-	if *fancy {
-		if total > 0 {
-			fmt.Printf("%s✅ Done! Results saved to %s%s\n", report.Green, outputFile, report.Reset)
-		} else {
-			fmt.Printf("%s⚠️  No results. Wrote header to %s%s\n", report.Yellow, outputFile, report.Reset)
+	for _, outputFile := range outputFiles {
+		format := outputFile[strings.LastIndex(outputFile, ".")+1:]
+		switch {
+		case !*fancy:
+			fmt.Printf("Results saved to %s (%d)\n", outputFile, totals[format])
+		case totals[format] > 0:
+			fmt.Printf("%s✅ %d finding(s) saved to %s%s\n",
+				report.Green, totals[format], outputFile, report.Reset)
+		default:
+			fmt.Printf("%s⚠️  No results. Wrote header to %s%s\n",
+				report.Yellow, outputFile, report.Reset)
 		}
-	} else {
-		fmt.Printf("Results saved to %s\n", outputFile)
 	}
 
 	cleanTmp(tmpDir)

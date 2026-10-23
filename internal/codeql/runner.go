@@ -68,28 +68,6 @@ func progressTicker(label string, stop <-chan struct{}) {
 	}
 }
 
-// CodeQLFormat maps HydraQL's --output-format to the value CodeQL's
-// `database analyze --format` actually accepts. CodeQL has no "sarif" or
-// "json" format: SARIF is requested as sarif-latest, and JSON is derived from
-// SARIF by the merge package.
-func CodeQLFormat(outputFormat string) string {
-	switch outputFormat {
-	case "csv":
-		return "csv"
-	default:
-		return "sarif-latest"
-	}
-}
-
-// ValidOutputFormat reports whether HydraQL knows how to produce the format.
-func ValidOutputFormat(outputFormat string) bool {
-	switch outputFormat {
-	case "csv", "json", "sarif":
-		return true
-	}
-	return false
-}
-
 // RunConfig holds per-query execution options.
 type RunConfig struct {
 	Verbose          bool
@@ -102,20 +80,20 @@ type RunConfig struct {
 	KillLockProcess  bool
 	SeverityFilter   string
 	StrictSeverity   bool
-	OutputFormat     string
 }
 
 // QueryResult is the output of a single RunQuery call.
 type QueryResult struct {
-	Project  string
-	OutFile  string
-	Findings int
-	TimedOut bool
-	Failed   bool
+	Project      string
+	CodeQLFormat string
+	OutFile      string
+	Findings     int
+	TimedOut     bool
+	Failed       bool
 }
 
 // RunQuery executes one CodeQL query with timeout, progress ticker, and retry.
-func RunQuery(ctx context.Context, query string, target ScanTarget, tmpDir string, cfg *RunConfig) QueryResult {
+func RunQuery(ctx context.Context, query string, target ScanTarget, codeqlFormat, tmpDir string, cfg *RunConfig) QueryResult {
 	lang, dbPath := target.Lang, target.DBPath
 
 	// The project belongs in the temp filename: without it, two projects'
@@ -126,7 +104,7 @@ func RunQuery(ctx context.Context, query string, target ScanTarget, tmpDir strin
 		parts = append(parts, sanitizeName(target.Project))
 	}
 	parts = append(parts, lang)
-	outFile := filepath.Join(tmpDir, strings.Join(parts, "_")+"."+cfg.OutputFormat)
+	outFile := filepath.Join(tmpDir, strings.Join(parts, "_")+"."+TempExt(codeqlFormat))
 	label := fmt.Sprintf("[%s] %s", target.Label(), filepath.Base(query))
 
 	if cfg.Fancy {
@@ -153,7 +131,7 @@ func RunQuery(ctx context.Context, query string, target ScanTarget, tmpDir strin
 		// Pre-query lock sweep
 		HandleCacheLocks(dbPath, cfg.UnlockCache, cfg.CheckLockProcess, cfg.KillLockProcess, cfg.Verbose)
 
-		ok, stderr, timedOut := analyzeOnce(queryCtx, query, dbPath, CodeQLFormat(cfg.OutputFormat), outFile, cfg.Verbose)
+		ok, stderr, timedOut := analyzeOnce(queryCtx, query, dbPath, codeqlFormat, outFile, cfg.Verbose)
 
 		if timedOut {
 			elapsed := int(time.Since(tStart).Seconds())
@@ -182,7 +160,7 @@ func RunQuery(ctx context.Context, query string, target ScanTarget, tmpDir strin
 			}
 			if retried {
 				time.Sleep(250 * time.Millisecond)
-				ok, stderr, timedOut = analyzeOnce(queryCtx, query, dbPath, CodeQLFormat(cfg.OutputFormat), outFile, cfg.Verbose)
+				ok, stderr, timedOut = analyzeOnce(queryCtx, query, dbPath, codeqlFormat, outFile, cfg.Verbose)
 				if timedOut {
 					elapsed := int(time.Since(tStart).Seconds())
 					appendLog("hydraql_failures.log", fmt.Sprintf("TIMEOUT after %ds: %s on %s\n", elapsed, query, lang))
@@ -213,12 +191,13 @@ func RunQuery(ctx context.Context, query string, target ScanTarget, tmpDir strin
 			return QueryResult{Failed: true}
 		}
 
-		findings := countFindings(outFile, cfg.OutputFormat, cfg.SeverityFilter, cfg.StrictSeverity)
+		findings := countFindings(outFile, codeqlFormat, cfg.SeverityFilter, cfg.StrictSeverity)
 		return QueryResult{OutFile: outFile, Findings: findings}
 	}()
 
 	stopProgress()
 	result.Project = target.Project
+	result.CodeQLFormat = codeqlFormat
 	return result
 }
 
@@ -240,15 +219,11 @@ func analyzeOnce(ctx context.Context, query, dbPath, format, outFile string, ver
 	return true, "", false
 }
 
-func countFindings(path, format, severityFilter string, strict bool) int {
-	switch format {
-	case "csv":
+func countFindings(path, codeqlFormat, severityFilter string, strict bool) int {
+	if codeqlFormat == "csv" {
 		return merge.CountCSV(path, severityFilter, strict)
-	case "json":
-		return merge.CountJSON(path, severityFilter, strict)
-	default:
-		return merge.CountSARIF(path, severityFilter, strict)
 	}
+	return merge.CountSARIF(path, severityFilter, strict)
 }
 
 func appendLog(logFile, msg string) {

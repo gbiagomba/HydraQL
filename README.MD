@@ -47,7 +47,7 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
 - 🔧 DB automation: auto-finalize (`-F`) and auto-init (`-i`) with `--source-root`
 - 🎨 Fancy colored output and ASCII summary chart (`-f` / `--fancy`)
 - 🔍 Severity filtering with strict or loose matching (`-s HIGH`)
-- 📊 Outputs in CSV, JSON, or SARIF (`-o sarif`)
+- 📊 Outputs in CSV, JSON, and SARIF, one or several per run (`-o all`)
 - ⏱️ Per-query timeout (`-T 600`) with real-time progress ticker — never hang on slow suites
 - 🚀 GitHub Actions CI: cross-compile, release, and Docker publish on tag
 
@@ -277,7 +277,7 @@ All flags support both a short form (`-X`) and the traditional long form (`--fla
 | `-l`  | `--langs`               | `java,javascript,typescript,python` | Comma-separated languages to scan |
 | `-q`  | `--query-dir`           | `~/Git/codeql` | Query directory (repeat or comma-separate for multiple) |
 | `-t`  | `--threads`             | `6`       | Parallel worker count (alias: `--parallel`)            |
-| `-o`  | `--output-format`       | `csv`     | Output format: `csv`, `json`, `sarif`                  |
+| `-o`  | `--output-format`       | `csv`     | Output formats: `csv`, `json`, `sarif`; comma-separate for several, or `all` |
 | `-s`  | `--severity`            | _(none)_  | Filter findings by severity (e.g. `HIGH`, `CRITICAL`)  |
 | `-S`  | `--strict-severity`     | `false`   | Exact severity match (no loose mapping)                |
 | `-f`  | `--fancy`               | `false`   | Colored output + ASCII chart                           |
@@ -321,6 +321,46 @@ is tagged with the project whose database produced it:
 
 CodeQL accepts neither `sarif` nor `json` as a `--format` value, so HydraQL
 requests `sarif-latest` for both and derives the JSON records from it.
+
+#### Several formats at once
+
+`--output-format` takes a comma-separated list, and `all` is shorthand for
+`csv,json,sarif`. Each format gets its own file, sharing one timestamp:
+
+```bash
+hydraql -d ./cqlDB -l javascript -q ~/Git/codeql -o all -f
+```
+```
+Results saved to HydraQL_output-20261023151822.csv (21)
+Results saved to HydraQL_output-20261023151822.json (21)
+Results saved to HydraQL_output-20261023151822.sarif (21)
+```
+
+`codeql database analyze --format` takes a single value, so formats are grouped
+by the pass that produces them:
+
+| Request | CodeQL passes |
+|---------|---------------|
+| `sarif` or `json` or `json,sarif` | 1 (`sarif-latest`) |
+| `csv` | 1 (`csv`) |
+| `csv,sarif` or `all` | 2 |
+
+JSON is a reshaping of SARIF, so it is free. CSV is **not** derived from SARIF,
+and that is deliberate. Compared against native CSV over 68 findings, a derived
+CSV diverged in five ways: CodeQL's CSV writer normalizes whitespace in
+multi-line `@description` blocks, anchors paths with a leading `/`, converts
+SARIF's exclusive `endColumn` to an inclusive one, restores the `startColumn`
+and `endLine` values SARIF omits when they sit at their defaults, and rewrites
+message links from SARIF's `[text](index)` into
+`[["text"|"relative:///path:line:col:line:col"]]` resolved against
+`relatedLocations`. Matching all of that would mean reimplementing CodeQL's CSV
+writer against undocumented conventions that can change between CLI releases,
+so CSV earns its own pass.
+
+The other values CodeQL's `--format` accepts are not offered: `graphtext`,
+`dot`, and `dgml` describe `@kind graph` queries rather than alerts and cannot
+be merged into a findings report; `sarifv1` and `sarifv2` use schemas the 2.1.0
+merger would corrupt; and `lgtm` is deprecated.
 
 ### Examples
 
@@ -405,8 +445,8 @@ On a `v*` tag push:
 
 To publish a release:
 ```bash
-git tag -a v2.3.0 -m "Release v2.3.0"
-git push origin v2.3.0
+git tag -a v2.4.0 -m "Release v2.4.0"
+git push origin v2.4.0
 ```
 
 Docker Hub publishing requires `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets set in the repository settings.
