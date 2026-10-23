@@ -47,7 +47,7 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
 - 🔧 DB automation: auto-finalize (`-F`) and auto-init (`-i`) with `--source-root`
 - 🎨 Fancy colored output and ASCII summary chart (`-f` / `--fancy`)
 - 🔍 Severity filtering with strict or loose matching (`-s HIGH`)
-- 📊 Outputs in CSV, JSON, and SARIF, one or several per run (`-o all`)
+- 📊 CSV, JSON, and SARIF in a single CodeQL pass (`-o all`), plus raw passthrough of any CodeQL format
 - ⏱️ Per-query timeout (`-T 600`) with real-time progress ticker — never hang on slow suites
 - 🚀 GitHub Actions CI: cross-compile, release, and Docker publish on tag
 
@@ -277,7 +277,7 @@ All flags support both a short form (`-X`) and the traditional long form (`--fla
 | `-l`  | `--langs`               | `java,javascript,typescript,python` | Comma-separated languages to scan |
 | `-q`  | `--query-dir`           | `~/Git/codeql` | Query directory (repeat or comma-separate for multiple) |
 | `-t`  | `--threads`             | `6`       | Parallel worker count (alias: `--parallel`)            |
-| `-o`  | `--output-format`       | `csv`     | Output formats: `csv`, `json`, `sarif`; comma-separate for several, or `all` |
+| `-o`  | `--output-format`       | `csv`     | Output formats, comma-separated: `all`, `csv`, `json`, `sarif`, or a CodeQL format passed straight through |
 | `-s`  | `--severity`            | _(none)_  | Filter findings by severity (e.g. `HIGH`, `CRITICAL`)  |
 | `-S`  | `--strict-severity`     | `false`   | Exact severity match (no loose mapping)                |
 | `-f`  | `--fancy`               | `false`   | Colored output + ASCII chart                           |
@@ -324,43 +324,61 @@ requests `sarif-latest` for both and derives the JSON records from it.
 
 #### Several formats at once
 
-`--output-format` takes a comma-separated list, and `all` is shorthand for
-`csv,json,sarif`. Each format gets its own file, sharing one timestamp:
+`-o all` runs CodeQL **once**, with `--format=sarif-latest`, and reshapes that
+SARIF into the CSV and JSON reports:
 
 ```bash
 hydraql -d ./cqlDB -l javascript -q ~/Git/codeql -o all -f
 ```
 ```
-Results saved to HydraQL_output-20261023151822.csv (21)
-Results saved to HydraQL_output-20261023151822.json (21)
-Results saved to HydraQL_output-20261023151822.sarif (21)
+[*] Output: sarif, json (from sarif), csv (from sarif); 1 CodeQL analyze pass (sarif-latest)
+✅ 63 finding(s) saved to HydraQL_output-20261023154332.sarif
+✅ 63 finding(s) saved to HydraQL_output-20261023154332.json
+✅ 63 finding(s) saved to HydraQL_output-20261023154332.csv
 ```
 
-`codeql database analyze --format` takes a single value, so formats are grouped
-by the pass that produces them:
+The reshaped CSV is byte-for-byte identical to CodeQL's own. It was checked by
+running the same 95 queries over the same database both ways and diffing the
+results: 63 findings, no differences. Getting there meant reproducing five
+conventions of CodeQL's CSV writer, each found by diffing rather than from
+documentation:
 
-| Request | CodeQL passes |
-|---------|---------------|
-| `sarif` or `json` or `json,sarif` | 1 (`sarif-latest`) |
-| `csv` | 1 (`csv`) |
-| `csv,sarif` or `all` | 2 |
+| Convention | Why it matters |
+|------------|----------------|
+| `fullDescription` over `properties.description` | CodeQL normalizes whitespace in the former; the latter keeps raw multi-line `@description` text |
+| Paths root-anchored with `/` | SARIF uris are relative |
+| `endColumn` exclusive to inclusive | off by one otherwise |
+| `startColumn` and `endLine` defaults | SARIF omits them at 1 and `=startLine` |
+| `[text](id)` to `[["text"\|"relative:///path:l:c:l:c"]]` | resolved through `relatedLocations` |
 
-JSON is a reshaping of SARIF, so it is free. CSV is **not** derived from SARIF,
-and that is deliberate. Compared against native CSV over 68 findings, a derived
-CSV diverged in five ways: CodeQL's CSV writer normalizes whitespace in
-multi-line `@description` blocks, anchors paths with a leading `/`, converts
-SARIF's exclusive `endColumn` to an inclusive one, restores the `startColumn`
-and `endLine` values SARIF omits when they sit at their defaults, and rewrites
-message links from SARIF's `[text](index)` into
-`[["text"|"relative:///path:line:col:line:col"]]` resolved against
-`relatedLocations`. Matching all of that would mean reimplementing CodeQL's CSV
-writer against undocumented conventions that can change between CLI releases,
-so CSV earns its own pass.
+#### Passthrough to CodeQL
 
-The other values CodeQL's `--format` accepts are not offered: `graphtext`,
-`dot`, and `dgml` describe `@kind graph` queries rather than alerts and cannot
-be merged into a findings report; `sarifv1` and `sarifv2` use schemas the 2.1.0
-merger would corrupt; and `lgtm` is deprecated.
+Naming a CodeQL format sends that exact value to
+`codeql database analyze --format`:
+
+| Format | Behavior |
+|--------|----------|
+| `csv` | CodeQL's own CSV writer, in its own pass. `-o csv` is never the reshaped output |
+| `sarif-latest`, `sarifv2.1.0` | forwarded as given and still merged, since both are SARIF 2.1.0. CodeQL records the spelling in `semmle.formatSpecifier` |
+| `dot`, `dgml`, `graphtext` | cannot be merged, so the per-query files are collected into `HydraQL_output-<timestamp>-<format>/` as CodeQL wrote them |
+
+So `-o csv,sarif` costs two passes and gives native CSV, while `-o all` costs
+one and gives reshaped CSV. The run header always states which.
+
+Query `@kind` decides what each pass runs: graph formats get `@kind graph`
+queries, csv/json/sarif get `problem` and `path-problem` queries.
+
+Three values CodeQL's `--help` still advertises are refused before any work
+starts, because the CLI itself rejects them at run time:
+
+```
+$ hydraql -o lgtm ...
+output format "lgtm" is not usable: the LGTM results format was removed in CodeQL CLI 2.23.5.
+```
+
+`sarifv1` and `sarifv2` went the same way in CLI 2.8.2. A graph format
+requested with no `@kind graph` queries available is also refused up front
+rather than failing on every query.
 
 ### Examples
 
@@ -445,8 +463,8 @@ On a `v*` tag push:
 
 To publish a release:
 ```bash
-git tag -a v2.4.0 -m "Release v2.4.0"
-git push origin v2.4.0
+git tag -a v2.5.0 -m "Release v2.5.0"
+git push origin v2.5.0
 ```
 
 Docker Hub publishing requires `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets set in the repository settings.

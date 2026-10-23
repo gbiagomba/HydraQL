@@ -224,34 +224,6 @@ func TestAliasLangsDedupes(t *testing.T) {
 	}
 }
 
-func TestCodeQLFormat(t *testing.T) {
-	// CodeQL rejects "sarif" and has no JSON writer at all; both must be
-	// requested as sarif-latest.
-	cases := map[string]string{
-		"csv":   "csv",
-		"sarif": "sarif-latest",
-		"json":  "sarif-latest",
-	}
-	for in, want := range cases {
-		if got := CodeQLFormat(in); got != want {
-			t.Errorf("CodeQLFormat(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestValidOutputFormat(t *testing.T) {
-	for _, ok := range []string{"csv", "json", "sarif"} {
-		if !ValidOutputFormat(ok) {
-			t.Errorf("ValidOutputFormat(%q) = false, want true", ok)
-		}
-	}
-	for _, bad := range []string{"", "xml", "sarif-latest", "CSV"} {
-		if ValidOutputFormat(bad) {
-			t.Errorf("ValidOutputFormat(%q) = true, want false", bad)
-		}
-	}
-}
-
 func TestCreateOptionsArgs(t *testing.T) {
 	cases := []struct {
 		name string

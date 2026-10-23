@@ -2,6 +2,7 @@ package merge
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"os"
 )
 
@@ -48,23 +49,52 @@ func CountCSV(path, severityFilter string, strict bool) int {
 }
 
 func MergeCSV(files []Input, output, severityFilter string, strict bool) (int, error) {
+	return writeCSV(collectCSVRows(files, severityFilter, strict, readNativeCSV), output)
+}
+
+// MergeCSVFromSARIF writes the same report from the SARIF pass's output
+// instead of a native CSV pass, reconstructing what CodeQL's CSV writer would
+// have produced. See csv_from_sarif.go for the conversion rules.
+func MergeCSVFromSARIF(files []Input, output, severityFilter string, strict bool) (int, error) {
+	return writeCSV(collectCSVRows(files, severityFilter, strict, readSARIFAsCSV), output)
+}
+
+type csvRowReader func(path string) [][]string
+
+func readNativeCSV(path string) [][]string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	r := csv.NewReader(f)
+	r.FieldsPerRecord = -1
+	all, err := r.ReadAll()
+	if err != nil {
+		return nil
+	}
+	return all
+}
+
+func readSARIFAsCSV(path string) [][]string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil
+	}
+	return CSVRowsFromSARIF(root)
+}
+
+func collectCSVRows(files []Input, severityFilter string, strict bool, read csvRowReader) [][]string {
 	var rows [][]string
 	for _, in := range files {
 		if in.Path == "" {
 			continue
 		}
-		f, err := os.Open(in.Path)
-		if err != nil {
-			continue
-		}
-		r := csv.NewReader(f)
-		r.FieldsPerRecord = -1
-		all, err := r.ReadAll()
-		f.Close()
-		if err != nil {
-			continue
-		}
-		for _, row := range all {
+		for _, row := range read(in.Path) {
 			if isHeaderRow(row) {
 				continue
 			}
@@ -74,7 +104,10 @@ func MergeCSV(files []Input, output, severityFilter string, strict bool) (int, e
 			rows = append(rows, append([]string{in.Project}, row...))
 		}
 	}
+	return rows
+}
 
+func writeCSV(rows [][]string, output string) (int, error) {
 	out, err := os.Create(output)
 	if err != nil {
 		return 0, err

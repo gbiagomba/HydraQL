@@ -23,7 +23,7 @@ import (
 
 // version is overridable at link time via -X main.version (see Makefile LDFLAGS),
 // so it must stay a var: -X cannot patch a const.
-var version = "2.4.0"
+var version = "2.5.0"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string
@@ -56,7 +56,8 @@ func main() {
 	pflag.IntVar(threads, "parallel", 6, "")
 	_ = pflag.CommandLine.MarkHidden("parallel")
 	outputFormat := pflag.StringP("output-format", "o", "csv",
-		"Output formats: csv, json, sarif; comma-separate for several, or \"all\"")
+		"Output formats, comma-separated: all, csv, json, sarif, or a CodeQL format "+
+			"(sarif-latest, sarifv2.1.0, dot, dgml, graphtext) passed straight through")
 	severityFilter := pflag.StringP("severity", "s", "", "Filter findings by severity (e.g. HIGH, CRITICAL)")
 	strictSeverity := pflag.BoolP("strict-severity", "S", false, "Exact severity match only (no loose mapping)")
 	fancy := pflag.BoolP("fancy", "f", false, "Colored output and ASCII chart")
@@ -266,9 +267,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	graphQueries := codeql.CountGraphQueries(pairs)
+	alertQueries := len(pairs) - graphQueries
+
+	// Fail before any analysis rather than once per query: CodeQL's graph
+	// writers reject a run with no @kind graph queries selected.
+	if outputPlan.NeedsGraphQueries() && graphQueries == 0 {
+		fmt.Fprintf(os.Stderr,
+			"%s✖ A graph output format was requested, but none of the %d gathered queries is @kind graph.%s\n",
+			report.Red, len(pairs), report.Reset)
+		fmt.Fprintln(os.Stderr,
+			"  CodeQL's dot, dgml, and graphtext writers only accept graph queries.")
+		os.Exit(1)
+	}
+	if outputPlan.NeedsAlertQueries() && alertQueries == 0 {
+		fmt.Fprintf(os.Stderr,
+			"%s✖ No alert queries found; csv, json, and sarif need @kind problem or path-problem queries.%s\n",
+			report.Red, report.Reset)
+		os.Exit(1)
+	}
+
 	if *fancy {
-		fmt.Printf("%s[*]%s Found %d queries across %d database(s); output: %s\n",
-			report.Magenta, report.Reset, len(pairs), len(targets), outputPlan.Describe())
+		fmt.Printf("%s[*]%s Found %d queries (%d alert, %d graph) across %d database(s)\n",
+			report.Magenta, report.Reset, len(pairs), alertQueries, graphQueries, len(targets))
+		fmt.Printf("%s[*]%s Output: %s\n", report.Magenta, report.Reset, outputPlan.Describe())
 	}
 
 	// ---- Parallel execution ----
@@ -296,17 +318,19 @@ func main() {
 	workerSem := make(chan struct{}, *threads)
 	ctx := context.Background()
 
-	// Each requested CodeQL format is its own analyze pass, because
-	// `database analyze --format` takes a single value.
-	queries := 0
+	// Each distinct CodeQL format is its own analyze pass, because
+	// `database analyze --format` takes a single value. A pass only runs the
+	// queries its writer can consume.
+	queriesPerPass := map[string]int{}
 	var wg sync.WaitGroup
-	for _, target := range targets {
-		for _, pair := range pairs {
-			if pair.Lang != target.Lang {
-				continue
-			}
-			queries++
-			for _, cf := range codeqlFormats {
+	for _, cf := range codeqlFormats {
+		wantGraph := codeql.IsGraphFormat(cf)
+		for _, target := range targets {
+			for _, pair := range pairs {
+				if pair.Lang != target.Lang || pair.IsGraph() != wantGraph {
+					continue
+				}
+				queriesPerPass[cf]++
 				wg.Add(1)
 				go func(q codeql.QueryPair, t codeql.ScanTarget, cf string) {
 					defer wg.Done()
@@ -329,7 +353,8 @@ func main() {
 	var perQueryCounts []int
 	perProject := map[string]int{}
 	timedOutCount := 0
-	primaryPass := codeql.CodeQLFormat(outputPlan.Primary())
+	primaryTarget, hasPrimary := outputPlan.Primary()
+	primaryPass := primaryTarget.CodeQLFormat
 	for r := range results {
 		if r.OutFile != "" {
 			inputsByPass[r.CodeQLFormat] = append(inputsByPass[r.CodeQLFormat],
@@ -352,39 +377,62 @@ func main() {
 	ts := time.Now().Format("20060102150405")
 	totals := map[string]int{}
 	var outputFiles []string
+	var rawDirs []string
 
-	for _, format := range outputPlan.Formats() {
-		outputFile := fmt.Sprintf("HydraQL_output-%s.%s", ts, format)
-		inputs := inputsByPass[codeql.CodeQLFormat(format)]
+	for _, t := range outputPlan.Targets() {
+		inputs := inputsByPass[t.CodeQLFormat]
 
+		// Raw formats cannot be merged, so CodeQL's own per-query files are
+		// collected into a directory instead.
+		if t.Mode == codeql.OutputRaw {
+			dir := fmt.Sprintf("HydraQL_output-%s-%s", ts, t.Name)
+			n, err := merge.CollectRaw(inputs, dir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to collect %s output: %v\n", t.Name, err)
+				os.Exit(1)
+			}
+			rawDirs = append(rawDirs, fmt.Sprintf("%s (%d file(s))", dir, n))
+			continue
+		}
+
+		outputFile := fmt.Sprintf("HydraQL_output-%s.%s", ts, t.Name)
 		var total int
 		var mergeErr error
-		switch format {
-		case "csv":
+		switch {
+		case t.Name == "csv" && t.Mode == codeql.OutputDerived:
+			total, mergeErr = merge.MergeCSVFromSARIF(inputs, outputFile, *severityFilter, *strictSeverity)
+		case t.Name == "csv":
 			total, mergeErr = merge.MergeCSV(inputs, outputFile, *severityFilter, *strictSeverity)
-		case "json":
+		case t.Name == "json":
 			total, mergeErr = merge.MergeJSON(inputs, outputFile, *severityFilter, *strictSeverity)
 		default:
 			total, mergeErr = merge.MergeSARIF(inputs, outputFile, *severityFilter, *strictSeverity)
 		}
 		if mergeErr != nil {
-			fmt.Fprintf(os.Stderr, "Merge error for %s: %v\n", format, mergeErr)
+			fmt.Fprintf(os.Stderr, "Merge error for %s: %v\n", t.Name, mergeErr)
 			os.Exit(1)
 		}
-		totals[format] = total
+		totals[t.Name] = total
 		outputFiles = append(outputFiles, outputFile)
 	}
 
 	// ---- Summary ----
+	primaryName := ""
+	if hasPrimary {
+		primaryName = primaryTarget.Name
+	}
 	report.PrintSummary(report.Summary{
-		QueriesRun: queries,
-		Findings:   totals[outputPlan.Primary()],
+		QueriesRun: queriesPerPass[primaryPass],
+		Findings:   totals[primaryName],
 		TimedOut:   timedOutCount,
 		Databases:  len(targets),
 		PerQuery:   perQueryCounts,
 		PerProject: perProject,
 	}, *fancy)
 
+	for _, dir := range rawDirs {
+		fmt.Printf("Raw CodeQL output in %s\n", dir)
+	}
 	for _, outputFile := range outputFiles {
 		format := outputFile[strings.LastIndex(outputFile, ".")+1:]
 		switch {

@@ -2,6 +2,20 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.5.0] - 2026-10-23
+### Changed
+- **`-o all` is now a single CodeQL pass.** CodeQL runs once with `--format=sarif-latest`, and the CSV and JSON reports are reshaped from that SARIF instead of costing their own analysis. In 2.4.0 this took two passes.
+
+  The CSV reconstruction is byte-for-byte identical to CodeQL's own writer. It was validated by running the same 95 queries over the same database both ways and diffing: 63 findings, no differences. Five conventions had to be reproduced to get there, each found by diffing rather than from documentation: `fullDescription` is used in preference to `properties.description` because CodeQL normalizes whitespace in the former and leaves multi-line `@description` text raw in the latter; paths are root-anchored with a leading `/`; SARIF's exclusive `endColumn` becomes inclusive; `startColumn` and `endLine` are restored from the SARIF defaults (1, and equal to `startLine`) when omitted; and message links are rewritten from SARIF's `[text](id)` into `[["text"|"relative:///path:line:col:line:col"]]` resolved through `relatedLocations`.
+
+### Added
+- **Raw CodeQL format passthrough.** Naming a CodeQL format sends that exact value to `codeql database analyze --format`:
+  - `csv` runs CodeQL's own CSV writer in its own pass, so `-o csv` is unchanged from 2.4.0 and is not the reshaped output.
+  - `sarif-latest` and `sarifv2.1.0` are forwarded as given and still merge, because HydraQL understands the SARIF 2.1.0 they produce. CodeQL records the spelling in `semmle.formatSpecifier`.
+  - `dot`, `dgml`, and `graphtext` cannot be merged, since each describes one query's graph with no schema for combining several. Their per-query files are collected into `HydraQL_output-<timestamp>-<format>/` exactly as CodeQL wrote them.
+- **Query `@kind` is now read** alongside the imported language, from the same single header read. Each pass only runs the queries its writer accepts: graph formats get `@kind graph` queries, and csv/json/sarif get `problem` and `path-problem` queries. Previously a graph query under a SARIF pass would simply fail and be logged.
+- **Formats CodeQL no longer supports are rejected before any work starts**, naming the CLI version that removed them: `sarifv1` and `sarifv2` (removed in 2.8.2) and `lgtm` (removed in 2.23.5). CodeQL's own `--help` still advertises all three, and the CLI only rejects them once per query. A graph format requested with no `@kind graph` queries available is likewise refused up front rather than failing on every query.
+
 ## [2.4.0] - 2026-10-23
 ### Added
 - **`--output-format` accepts several formats**, comma-separated, with `all` as a shorthand for `csv,json,sarif`. Each writes its own `HydraQL_output-<timestamp>.<ext>`, sharing one timestamp, and the run header reports how many CodeQL passes the request costs.

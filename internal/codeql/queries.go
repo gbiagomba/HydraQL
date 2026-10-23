@@ -13,24 +13,50 @@ import (
 
 var importLangRe = regexp.MustCompile(`(?im)^\s*import\s+(java|javascript|python|cpp|swift|ruby|kotlin|typescript)\b`)
 
+// kindRe reads the @kind metadata that decides which CodeQL writers a query
+// can feed: graph queries work with --format=dot/dgml/graphtext, while
+// problem and path-problem queries produce the alerts that csv and sarif show.
+var kindRe = regexp.MustCompile(`(?im)^\s*\*?\s*@kind\s+([a-z-]+)`)
+
 type QueryPair struct {
 	Query string
 	Lang  string
+	Kind  string // @kind metadata: problem, path-problem, graph, or empty
 }
 
-func inferQueryLanguage(queryPath string) string {
+// IsGraph reports whether the query feeds CodeQL's graph writers.
+func (q QueryPair) IsGraph() bool { return q.Kind == "graph" }
+
+// inferQueryMetadata reads a query's header once for both the language it
+// imports and its @kind.
+func inferQueryMetadata(queryPath string) (lang, kind string) {
 	f, err := os.Open(queryPath)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer f.Close()
 	buf := make([]byte, 8000)
 	n, _ := f.Read(buf)
-	m := importLangRe.FindSubmatch(buf[:n])
-	if m != nil {
-		return LangAlias(string(m[1]))
+	head := buf[:n]
+
+	if m := importLangRe.FindSubmatch(head); m != nil {
+		lang = LangAlias(string(m[1]))
 	}
-	return ""
+	if m := kindRe.FindSubmatch(head); m != nil {
+		kind = strings.ToLower(string(m[1]))
+	}
+	return lang, kind
+}
+
+// CountGraphQueries reports how many gathered queries are @kind graph.
+func CountGraphQueries(pairs []QueryPair) int {
+	n := 0
+	for _, p := range pairs {
+		if p.IsGraph() {
+			n++
+		}
+	}
+	return n
 }
 
 // GatherQueries discovers all .ql/.qls files under queryDirs that match langs.
@@ -93,9 +119,9 @@ func GatherQueries(queryDirs, langs []string, suiteOnly, verbose bool) []QueryPa
 
 	var pairs []QueryPair
 	for _, q := range collected {
-		detected := inferQueryLanguage(q)
+		detected, kind := inferQueryMetadata(q)
 		if detected != "" && langSet[detected] {
-			pairs = append(pairs, QueryPair{Query: q, Lang: detected})
+			pairs = append(pairs, QueryPair{Query: q, Lang: detected, Kind: kind})
 			continue
 		}
 		// path-hint fallback: check if any lang appears in the path segments
@@ -109,7 +135,7 @@ func GatherQueries(queryDirs, langs []string, suiteOnly, verbose bool) []QueryPa
 			}
 		}
 		if hinted != "" {
-			pairs = append(pairs, QueryPair{Query: q, Lang: hinted})
+			pairs = append(pairs, QueryPair{Query: q, Lang: hinted, Kind: kind})
 		} else if verbose {
 			fmt.Printf("%s⚠️  Could not infer language for query:%s %s\n", report.Yellow, report.Reset, q)
 		}
