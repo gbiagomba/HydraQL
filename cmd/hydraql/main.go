@@ -23,7 +23,7 @@ import (
 
 // version is overridable at link time via -X main.version (see Makefile LDFLAGS),
 // so it must stay a var: -X cannot patch a const.
-var version = "2.6.0"
+var version = "2.7.0"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string
@@ -94,7 +94,8 @@ func main() {
 	// StringArrayVar, not the comma-splitting slice: a build command may well
 	// contain a comma, and splitting it would silently corrupt the command.
 	pflag.StringArrayVar(&buildCommands, "build-command", nil,
-		"Build command for compiled languages, as codeql --command (repeat for several)")
+		"Build command for compiled languages, as codeql --command. "+
+			"Prefix with a language (java=\"./build.sh android\") to bind it to that language. Repeat for several")
 	buildMode := pflag.String("build-mode", "",
 		"CodeQL build mode: none, autobuild, or manual (default: let CodeQL decide)")
 	buildTimeout := pflag.Int("build-timeout", 0, "Per-database creation timeout in seconds (0 = no timeout)")
@@ -146,9 +147,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	globalCommands, perLangCommands := codeql.ParseBuildCommands(buildCommands)
 	createOpts := codeql.CreateOptions{
 		BuildMode:     *buildMode,
-		BuildCommands: buildCommands,
+		BuildCommands: globalCommands,
+		PerLang:       perLangCommands,
 	}
 	if err := createOpts.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -184,6 +187,7 @@ func main() {
 		CreateOptions:    createOpts,
 		ResolveSymlinks:  resolveSymlinks,
 		Rebuild:          *rebuildDB,
+		AllowMissingDB:   *allowMissingDB,
 		BuildTimeout:     *buildTimeout,
 		BuildThreads:     *buildThreads,
 		UnlockCache:      *unlockCache,
@@ -208,21 +212,30 @@ func main() {
 		fmt.Printf("[*] Building %d database(s) under %s/ for %s\n",
 			len(projects), *dbRoot, strings.Join(langList, ","))
 
-		built := codeql.BuildDatabases(context.Background(), projects, buildCfg)
+		outcomes := codeql.BuildDatabases(context.Background(), projects, buildCfg)
+
+		usable := 0
+		for _, o := range outcomes {
+			if o.OK() {
+				usable++
+			}
+		}
 
 		if *buildOnly {
 			if *dryRun {
-				fmt.Printf("Dry run: would build %d database(s).\n", len(projects))
+				fmt.Printf("Dry run: would build %d project(s).\n", len(projects))
 				os.Exit(0)
 			}
-			fmt.Printf("Built %d of %d database(s).\n", len(built), len(projects))
-			if len(built) < len(projects) {
+			fmt.Printf("Built usable databases for %d of %d project(s).\n", usable, len(projects))
+			if usable < len(projects) && !*allowMissingDB {
 				os.Exit(1)
 			}
 			os.Exit(0)
 		}
-		if !*dryRun && len(built) == 0 {
-			fmt.Fprintln(os.Stderr, "No databases were built successfully; exiting.")
+		// A partially built project is still worth scanning, which is what
+		// --allow-missing-db asks for. Only a total washout is fatal.
+		if !*dryRun && usable == 0 {
+			fmt.Fprintln(os.Stderr, "No scannable databases were produced; exiting.")
 			os.Exit(1)
 		}
 	}

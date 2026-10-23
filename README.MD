@@ -39,7 +39,8 @@ Born from the need to scale CodeQL analysis across large, multi-language codebas
 - 🧩 Multiple query directories (comma-separated or repeated `-q`)
 - 🐍 Language aliasing (TypeScript→JavaScript, Kotlin→Java, Go→Go)
 - 🏗️ **One-stop build and scan** (`-b` / `--build-root`): creates a database cluster per project source dir, finalizes it, then scans it. No separate `codeql database create` / `finalize` loops
-- 🔨 **Build commands for compiled languages** (`--build-command`, `--build-mode`): passthrough to CodeQL's `--command`, so Java/Kotlin, C/C++, C#, and Swift build as part of the same run
+- 🔨 **Build commands for compiled languages** (`--build-command`, `--build-mode`): passthrough to CodeQL's `--command`, bindable per language (`java=...`), so a tree that builds Android and iOS differently works in one run
+- 🩹 **Partly built clusters are salvaged**: one language failing its build no longer discards the languages that extracted fine
 - 🔗 **Symlink resolution** (on by default): a symlinked source root is resolved to its real target before CodeQL sees it, so extraction stays scoped to the linked subtree instead of widening to the link targets' common ancestor
 - 🗂️ **Multi-database scanning**: one run fans out across every project under `--db-root`, and findings carry the project they came from
 - 🛡️ Database preflight: presence, finalization, structure, and emptiness checks
@@ -262,6 +263,50 @@ supplying a command already implies `manual`, so the two are rarely combined.
 `--build-mode none` together with `--build-command` is rejected outright, since
 that mode never builds the source root.
 
+**The command must actually invoke a compiler.** CodeQL only sees a real build,
+so a verification or lint script produces an empty database for every compiled
+language. A language with no build action at all can only ever be empty; drop it
+from `--langs` rather than paying for the extraction attempt.
+
+#### Different builds per language
+
+`codeql database create --db-cluster` runs **one** build command for all
+compiled languages, so a tree that builds Android and iOS separately cannot be
+expressed in a single cluster. Bind commands to languages instead:
+
+```bash
+hydraql --source-dir . -d . --db-prefix cqlDB_ \
+  -l javascript,typescript,python,kotlin,swift \
+  --build-command java="./build.sh build-android" \
+  --build-command swift="./build.sh build-ios"
+```
+
+A value is treated as per-language only when the text before the first `=` is a
+known language with no whitespace, so `make CC=gcc` stays a global command.
+`kotlin=` resolves to `java`, matching CodeQL's extractor set.
+
+Languages sharing a command list build together in one cluster. When commands
+differ, each language is created on its own, because `--overwrite` against a
+cluster root destroys its sibling language directories. That costs one source
+scan per language, and the run says so when it takes that route.
+
+#### A partly built cluster is kept
+
+CodeQL finalizes a cluster as one step at the end, so one language failing
+there leaves every language unfinalized, including ones that extracted fine.
+HydraQL finalizes each language regardless, keeps what works, and fails a
+project only when nothing is usable:
+
+```
+⚠️  proj: codeql database create reported failures; salvaging what extracted
+   ✅ proj: javascript ready
+   ⚠️  proj: cpp extracted no code
+      Check that the build command actually compiles those languages
+   Built 1 of 2 requested language(s) for proj
+```
+
+The scan then runs against the languages that worked.
+
 **The command's working directory is the resolved source root.** Because
 symlinks are resolved first, a `build.sh` sitting next to a *symlink* is not
 next to the directory CodeQL ends up in. Reference the script by a path that
@@ -300,7 +345,7 @@ All flags support both a short form (`-X`) and the traditional long form (`--fla
 |       | `--build-only`          | `false`   | Build and finalize databases, then exit without analyzing |
 |       | `--rebuild-db`          | `false`   | Force rebuild of existing DBs (`database create --overwrite`) |
 |       | `--no-resolve-symlinks` | `false`   | Do not resolve symlinked source roots before CodeQL sees them |
-|       | `--build-command`       | _(none)_  | Build command for compiled languages, as codeql `--command` (repeat for several) |
+|       | `--build-command`       | _(none)_  | Build command, as codeql `--command`. Prefix with a language (`java=...`) to bind it (repeat for several) |
 |       | `--build-mode`          | _(none)_  | CodeQL build mode: `none`, `autobuild`, or `manual`    |
 |       | `--build-timeout`       | `0`       | Per-database creation timeout in seconds (`0` = none)  |
 |       | `--external`            | _(none)_  | External predicate data as `predicate=file.csv` (repeat for several) |
@@ -492,8 +537,8 @@ On a `v*` tag push:
 
 To publish a release:
 ```bash
-git tag -a v2.6.0 -m "Release v2.6.0"
-git push origin v2.6.0
+git tag -a v2.7.0 -m "Release v2.7.0"
+git push origin v2.7.0
 ```
 
 Docker Hub publishing requires `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets set in the repository settings.

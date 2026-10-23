@@ -30,7 +30,7 @@ func FinalizeDB(dbDir string, verbose bool) bool {
 // or CodeQL will widen the extraction to the link targets' common ancestor.
 func InitDB(dbDir, lang, sourceRoot string, opts CreateOptions, verbose bool) bool {
 	args := append([]string{"database", "create", dbDir,
-		"--language=" + lang, "--source-root=" + sourceRoot}, opts.args()...)
+		"--language=" + lang, "--source-root=" + sourceRoot}, opts.args([]string{lang})...)
 	cmd := exec.Command("codeql", args...)
 	if verbose {
 		fmt.Printf("   cmd: %s\n", strings.Join(cmd.Args, " "))

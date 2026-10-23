@@ -27,6 +27,18 @@ func LangAlias(lang string) string {
 	return strings.ToLower(lang)
 }
 
+// knownLanguages are the names --langs and --build-command accept. The aliases
+// typescript and kotlin are included because CodeQL resolves them to the
+// javascript and java extractors.
+var knownLanguages = map[string]bool{
+	"javascript": true, "typescript": true, "java": true, "kotlin": true,
+	"python": true, "cpp": true, "csharp": true, "go": true,
+	"ruby": true, "swift": true, "rust": true, "actions": true,
+}
+
+// IsKnownLanguage reports whether name is a language HydraQL recognizes.
+func IsKnownLanguage(name string) bool { return knownLanguages[strings.ToLower(name)] }
+
 // AliasLangs maps every entry through LangAlias and drops duplicates, keeping
 // the original order. CodeQL has no separate typescript extractor, so passing
 // "javascript,typescript" to `database create --db-cluster` would extract the

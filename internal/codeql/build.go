@@ -44,7 +44,51 @@ var DefaultExcludes = []string{
 // shared by the cluster build phase and the single-language --auto-init-db path.
 type CreateOptions struct {
 	BuildMode     string   // none | autobuild | manual; empty lets CodeQL decide
-	BuildCommands []string // each becomes a --command=<cmd>
+	BuildCommands []string // apply to every language
+
+	// PerLang holds commands bound to a single language, keyed by the aliased
+	// language name. CodeQL runs one build command per `database create`, so a
+	// tree needing different builds per language (an Android build for java, an
+	// iOS build for swift) cannot be expressed in a single cluster invocation.
+	PerLang map[string][]string
+}
+
+// CommandsFor returns the build commands that apply to one language: its own if
+// any were bound to it, otherwise the global ones.
+func (o CreateOptions) CommandsFor(lang string) []string {
+	if cmds, ok := o.PerLang[LangAlias(lang)]; ok {
+		return cmds
+	}
+	return o.BuildCommands
+}
+
+// HasPerLang reports whether any command is bound to a specific language.
+func (o CreateOptions) HasPerLang() bool { return len(o.PerLang) > 0 }
+
+// ParseBuildCommands splits raw --build-command values into global commands and
+// per-language ones.
+//
+// A value counts as per-language only when the text before the first "=" is a
+// known language name and contains no whitespace. That keeps a global command
+// such as `make CC=gcc` global, since "make CC" has a space and is not a
+// language.
+func ParseBuildCommands(raw []string) (global []string, perLang map[string][]string) {
+	perLang = map[string][]string{}
+	for _, entry := range raw {
+		if prefix, cmd, found := strings.Cut(entry, "="); found {
+			candidate := strings.TrimSpace(prefix)
+			if candidate != "" && !strings.ContainsAny(candidate, " \t") && IsKnownLanguage(candidate) {
+				lang := LangAlias(candidate)
+				perLang[lang] = append(perLang[lang], cmd)
+				continue
+			}
+		}
+		global = append(global, entry)
+	}
+	if len(perLang) == 0 {
+		perLang = nil
+	}
+	return global, perLang
 }
 
 // ValidBuildModes are the modes `codeql database create --build-mode` accepts.
@@ -73,17 +117,46 @@ func (o CreateOptions) Validate() error {
 	return nil
 }
 
-// args renders the options as `codeql database create` arguments. Specifying a
-// command already implies manual build mode, so no mode is added for it.
-func (o CreateOptions) args() []string {
+// args renders the options for a set of languages that share one command list.
+// Specifying a command already implies manual build mode, so no mode is added
+// for it.
+func (o CreateOptions) args(langs []string) []string {
 	var out []string
 	if o.BuildMode != "" {
 		out = append(out, "--build-mode="+o.BuildMode)
 	}
-	for _, cmd := range o.BuildCommands {
+	cmds := o.BuildCommands
+	if len(langs) > 0 {
+		cmds = o.CommandsFor(langs[0])
+	}
+	for _, cmd := range cmds {
 		out = append(out, "--command="+cmd)
 	}
 	return out
+}
+
+// buildGroup is a set of languages that share one build command list and can
+// therefore be created in a single invocation.
+type buildGroup struct {
+	langs []string
+	key   string
+}
+
+// groupLangs partitions languages by the command list that applies to them,
+// preserving the order languages were requested in.
+func groupLangs(langs []string, opts CreateOptions) []buildGroup {
+	var groups []buildGroup
+	index := map[string]int{}
+	for _, lang := range langs {
+		key := strings.Join(opts.CommandsFor(lang), "\x1f")
+		if i, ok := index[key]; ok {
+			groups[i].langs = append(groups[i].langs, lang)
+			continue
+		}
+		index[key] = len(groups)
+		groups = append(groups, buildGroup{langs: []string{lang}, key: key})
+	}
+	return groups
 }
 
 // Project is one source tree that gets its own CodeQL database cluster.
@@ -107,6 +180,7 @@ type BuildConfig struct {
 	Exclude         []string // globs matched against build-root child names
 	ResolveSymlinks bool
 	Rebuild         bool
+	AllowMissingDB  bool
 	BuildTimeout    int // seconds; 0 = no timeout
 	BuildThreads    int
 
@@ -367,18 +441,18 @@ func clusterReady(dbPath string, langs []string) bool {
 	return true
 }
 
-// BuildDatabases creates and finalizes one database cluster per project and
-// returns the projects whose clusters are usable afterwards.
-func BuildDatabases(ctx context.Context, projects []Project, cfg *BuildConfig) []Project {
+// BuildDatabases creates and finalizes databases for each project and reports,
+// per project, which languages ended up scannable.
+func BuildDatabases(ctx context.Context, projects []Project, cfg *BuildConfig) []BuildOutcome {
 	threads := cfg.BuildThreads
 	if threads < 1 {
 		threads = 1
 	}
 
 	var (
-		mu    sync.Mutex
-		built []Project
-		wg    sync.WaitGroup
+		mu       sync.Mutex
+		outcomes []BuildOutcome
+		wg       sync.WaitGroup
 	)
 	sem := make(chan struct{}, threads)
 
@@ -388,57 +462,131 @@ func BuildDatabases(ctx context.Context, projects []Project, cfg *BuildConfig) [
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			if buildOne(ctx, p, cfg) {
-				mu.Lock()
-				built = append(built, p)
-				mu.Unlock()
-			}
+			out := buildOne(ctx, p, cfg)
+			mu.Lock()
+			outcomes = append(outcomes, out)
+			mu.Unlock()
 		}(p)
 	}
 	wg.Wait()
 
-	sort.Slice(built, func(i, j int) bool { return built[i].Name < built[j].Name })
-	return built
+	sort.Slice(outcomes, func(i, j int) bool { return outcomes[i].Project.Name < outcomes[j].Project.Name })
+	return outcomes
 }
 
-func buildOne(ctx context.Context, p Project, cfg *BuildConfig) bool {
-	langArg := strings.Join(cfg.Langs, ",")
+// BuildOutcome records what a project's build actually produced.
+type BuildOutcome struct {
+	Project Project
+	Usable  []string // languages with a scannable database
+	Empty   []string // languages that extracted nothing
+}
+
+// OK reports whether at least one language is scannable.
+func (o BuildOutcome) OK() bool { return len(o.Usable) > 0 }
+
+func buildOne(ctx context.Context, p Project, cfg *BuildConfig) BuildOutcome {
+	groups := groupLangs(cfg.Langs, cfg.CreateOptions)
 
 	if !cfg.Rebuild && clusterReady(p.DBPath, cfg.Langs) {
 		fmt.Printf("  ⏭  %s: database already built at %s (use --rebuild-db to recreate)\n", p.Name, p.DBPath)
-		return finalizeCluster(p, cfg)
+		finalizeCluster(p, cfg)
+		return classify(p, cfg)
 	}
 
+	if cfg.DryRun {
+		for _, g := range groups {
+			for _, args := range createArgs(p, g, groups, cfg) {
+				fmt.Printf("  [dry-run] codeql %s\n", strings.Join(args, " "))
+			}
+		}
+		return BuildOutcome{Project: p}
+	}
+
+	// `codeql database create` refuses to create its target's parent, so the
+	// db-root has to exist first.
+	if err := os.MkdirAll(filepath.Dir(p.DBPath), 0o755); err != nil {
+		fmt.Printf("%s✖ Cannot create %s: %v%s\n", report.Red, filepath.Dir(p.DBPath), err, report.Reset)
+		return BuildOutcome{Project: p}
+	}
 	if _, err := os.Stat(p.DBPath); err == nil {
 		HandleCacheLocks(p.DBPath, cfg.UnlockCache, cfg.CheckLockProcess, cfg.KillLockProcess, cfg.Verbose)
 	}
 
-	args := []string{"database", "create", p.DBPath,
-		"--db-cluster",
-		"--language=" + langArg,
-		"--source-root=" + p.SourceRoot,
-	}
-	args = append(args, cfg.CreateOptions.args()...)
-	if cfg.Rebuild {
-		args = append(args, "--overwrite")
+	if len(groups) > 1 {
+		fmt.Printf("  %sℹ  %d build command groups, so each language is created separately.%s\n",
+			report.Yellow, len(groups), report.Reset)
+		fmt.Printf("     A cluster --overwrite destroys sibling languages, and the source is rescanned per language.\n")
 	}
 
-	if cfg.DryRun {
-		fmt.Printf("  [dry-run] codeql %s\n", strings.Join(args, " "))
-		return false
+	failures := 0
+	for _, g := range groups {
+		for _, args := range createArgs(p, g, groups, cfg) {
+			if !runCreate(ctx, p, g, args, cfg) {
+				failures++
+			}
+		}
 	}
 
-	// `codeql database create --db-cluster` refuses to create the cluster's
-	// parent directory, so the db-root has to exist first.
-	if err := os.MkdirAll(filepath.Dir(p.DBPath), 0o755); err != nil {
-		fmt.Printf("%s✖ Cannot create %s: %v%s\n", report.Red, filepath.Dir(p.DBPath), err, report.Reset)
-		return false
+	// Finalize regardless of exit codes. CodeQL finalizes a cluster as one step
+	// at the end, so one language failing there leaves every language
+	// unfinalized even when its extraction completed. Finalizing per language
+	// recovers the ones that did.
+	if failures > 0 {
+		fmt.Printf("  %s⚠️  %s: codeql database create reported failures; salvaging what extracted%s\n",
+			report.Yellow, p.Name, report.Reset)
+	}
+	finalizeCluster(p, cfg)
+
+	out := classify(p, cfg)
+	reportOutcome(out, cfg)
+	return out
+}
+
+// createArgs renders the `database create` invocations for one group. A single
+// group uses --db-cluster, which shares one source scan across its languages.
+// With several groups each language is created on its own, because --overwrite
+// against a cluster root destroys the sibling language directories.
+func createArgs(p Project, g buildGroup, groups []buildGroup, cfg *BuildConfig) [][]string {
+	if len(groups) == 1 {
+		args := []string{"database", "create", p.DBPath,
+			"--db-cluster",
+			"--language=" + strings.Join(g.langs, ","),
+			"--source-root=" + p.SourceRoot,
+		}
+		args = append(args, cfg.CreateOptions.args(g.langs)...)
+		if cfg.Rebuild {
+			args = append(args, "--overwrite")
+		}
+		return [][]string{args}
+	}
+
+	var out [][]string
+	for _, lang := range g.langs {
+		args := []string{"database", "create", filepath.Join(p.DBPath, lang),
+			"--language=" + lang,
+			"--source-root=" + p.SourceRoot,
+		}
+		args = append(args, cfg.CreateOptions.args([]string{lang})...)
+		if cfg.Rebuild {
+			args = append(args, "--overwrite")
+		}
+		out = append(out, args)
+	}
+	return out
+}
+
+func runCreate(ctx context.Context, p Project, g buildGroup, args []string, cfg *BuildConfig) bool {
+	label := p.Name + " (" + strings.Join(g.langs, ",") + ")"
+	for i, a := range args {
+		if strings.HasPrefix(a, "--language=") && i > 0 {
+			label = p.Name + " (" + strings.TrimPrefix(a, "--language=") + ")"
+		}
 	}
 
 	if cfg.Fancy {
-		fmt.Printf("%s🏗  Building %s (%s)%s\n", report.Cyan, p.Name, langArg, report.Reset)
+		fmt.Printf("%s🏗  Building %s%s\n", report.Cyan, label, report.Reset)
 	} else {
-		fmt.Printf("  → Building database for %s (%s)\n", p.Name, langArg)
+		fmt.Printf("  → Building database for %s\n", label)
 	}
 
 	buildCtx := ctx
@@ -448,7 +596,7 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) bool {
 		defer cancel()
 	}
 
-	stopProgress := startProgress("build " + p.Name)
+	stopProgress := startProgress("build " + label)
 	start := time.Now()
 
 	cmd := exec.CommandContext(buildCtx, "codeql", args...)
@@ -465,22 +613,53 @@ func buildOne(ctx context.Context, p Project, cfg *BuildConfig) bool {
 	if err != nil {
 		if buildCtx.Err() == context.DeadlineExceeded {
 			fmt.Printf("%s⏱  Database build for %s timed out after %ds%s\n",
-				report.Yellow, p.Name, cfg.BuildTimeout, report.Reset)
+				report.Yellow, label, cfg.BuildTimeout, report.Reset)
 			appendLog("hydraql_failures.log",
-				fmt.Sprintf("BUILD TIMEOUT after %ds: %s\n", cfg.BuildTimeout, p.Name))
+				fmt.Sprintf("BUILD TIMEOUT after %ds: %s\n", cfg.BuildTimeout, label))
 			return false
 		}
 		stderr := errBuf.String()
-		appendLog("hydraql_failures.log", fmt.Sprintf("BUILD FAIL %s:\n%s\n", p.Name, stderr))
+		appendLog("hydraql_failures.log", fmt.Sprintf("BUILD FAIL %s:\n%s\n", label, stderr))
 		if !cfg.Verbose {
 			fmt.Printf("%s", stderr[:min(len(stderr), 800)])
 		}
-		fmt.Printf("%s✖ Failed to build database for %s%s\n", report.Red, p.Name, report.Reset)
+		fmt.Printf("%s✖ codeql database create failed for %s%s\n", report.Red, label, report.Reset)
 		return false
 	}
 
-	fmt.Printf("  ✅ Built %s in %ds\n", p.Name, int(time.Since(start).Seconds()))
-	return finalizeCluster(p, cfg)
+	fmt.Printf("  ✅ Built %s in %ds\n", label, int(time.Since(start).Seconds()))
+	return true
+}
+
+// classify sorts the requested languages into those with a scannable database
+// and those that extracted nothing.
+func classify(p Project, cfg *BuildConfig) BuildOutcome {
+	out := BuildOutcome{Project: p}
+	for _, lang := range cfg.Langs {
+		if DBStructureOK(filepath.Join(p.DBPath, lang)) {
+			out.Usable = append(out.Usable, lang)
+		} else {
+			out.Empty = append(out.Empty, lang)
+		}
+	}
+	return out
+}
+
+func reportOutcome(out BuildOutcome, cfg *BuildConfig) {
+	if len(out.Usable) > 0 {
+		fmt.Printf("   ✅ %s: %s ready\n", out.Project.Name, strings.Join(out.Usable, ", "))
+	}
+	if len(out.Empty) > 0 {
+		fmt.Printf("   %s⚠️  %s: %s extracted no code%s\n",
+			report.Yellow, out.Project.Name, strings.Join(out.Empty, ", "), report.Reset)
+		if !cfg.CreateOptions.HasPerLang() && len(cfg.CreateOptions.BuildCommands) == 0 {
+			fmt.Printf("      A compiled language needs --build-command naming a command that invokes its compiler.\n")
+		} else {
+			fmt.Printf("      Check that the build command actually compiles those languages; CodeQL only sees a real build.\n")
+		}
+	}
+	fmt.Printf("   Built %d of %d requested language(s) for %s\n",
+		len(out.Usable), len(cfg.Langs), out.Project.Name)
 }
 
 // finalizeCluster finalizes each language database in the cluster. `codeql

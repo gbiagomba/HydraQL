@@ -2,6 +2,27 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.7.0] - 2026-10-23
+### Fixed
+- **A partially built cluster is no longer thrown away.** CodeQL finalizes a `--db-cluster` as one step at the end, so a single language failing there leaves *every* language unfinalized and without its `db-*` directory, even languages whose extraction completed. HydraQL returned on the non-zero exit without finalizing anything and exited with "No databases were built successfully".
+
+  A real run over a 26G monorepo requested five languages; JavaScript (183 TRAP files, 41M) and Python (206 TRAP files, 35M) had extracted completely and were discarded. Finalizing per language now recovers them: a copy of that JavaScript database finalizes cleanly and scans to 9 findings, while the C/C++ one still fails, which is the behavior this change relies on.
+
+  HydraQL now finalizes each language regardless of the create exit code, classifies each requested language with `DBStructureOK`, reports which are ready and which extracted nothing, and fails a project only when no language is usable. `--allow-missing-db` is finally honored by the build phase, not just by detection.
+
+### Added
+- **Per-language build commands.** `--build-command` accepts an optional language prefix, so a tree that builds differently per language can be expressed in one run:
+  ```bash
+  --build-command java="./build.sh build-android" \
+  --build-command swift="./build.sh build-ios"
+  ```
+  A value counts as per-language only when the text before the first `=` is a known language name with no whitespace, so a global command like `make CC=gcc` keeps its meaning. `kotlin=` resolves to java through `LangAlias`.
+
+  Languages sharing a command list are built together in one `--db-cluster` invocation, exactly as before. When commands differ, each language is created on its own instead, because `--overwrite` against a cluster root destroys its sibling language directories: tested directly, a single-language cluster create with `--overwrite` left the sibling as an empty 4K directory that CodeQL then called "not a recognized CodeQL database". The per-language path costs one source scan per language, and the run says so when it takes that route.
+
+### Changed
+- `BuildDatabases` returns `[]BuildOutcome` with the per-language result for each project, rather than the list of projects that fully succeeded.
+
 ## [2.6.0] - 2026-10-23
 ### Added
 - **`--external predicate=file.csv`**, forwarded to `codeql database analyze --external`. Repeat it for several predicates. A query declaring an extensional predicate cannot evaluate without one: `printAst.ql` fails with `The query depends on an extensional predicate selectedSourceFile which has not been defined`. The value is validated before any analysis starts, so a malformed pair, a missing file, or a directory given in place of a CSV is reported in a second rather than once per query. A leading `~` is expanded.
