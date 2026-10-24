@@ -2,6 +2,15 @@
 
 All notable changes to **HydraQL** will be documented in this file.
 
+## [2.9.0] - 2026-10-23
+### Added
+- **Nested symlinks are followed instead of only reported.** 2.8.0 warned that CodeQL cannot see symlinked directories inside a source root; a warning still left the user to split the run by hand. Each one now becomes a project of its own, named after its path within the root (`hz/nimbus-editor` becomes `hz-nimbus-editor`), so a single `--source-dir .` reaches everything. Links resolving inside the same root, and repeats of a target already covered, are skipped. `--no-follow-nested-symlinks` restores the warn-only behavior.
+- **Only languages a project actually contains are requested.** Each source root is walked once, recording both its nested symlinks and which requested languages have source present, keyed off file extension (with `.ts` and `.tsx` counting toward `javascript`, matching CodeQL's extractor). Requesting a language a tree has none of costs a full extraction attempt, and for a compiled language it also runs the build command somewhere that cannot satisfy it. `--all-langs` requests everything regardless.
+
+  The walk skips excluded directories, dot-directories and existing databases, never follows symlinks, and stops after two million entries; a truncated scan keeps every requested language, since absence was never established.
+
+  Together these turn one real invocation over five languages from 18 create calls, most of which could only fail, into 7 that can all succeed: the top-level tree builds javascript and python as a cluster plus java and swift with their bound build commands, while four symlinked TypeScript packages each build javascript alone.
+
 ## [2.8.1] - 2026-10-23
 ### Fixed
 - **The build summary contradicted itself.** A cluster create exits non-zero when any one of its languages fails, so a failed create does not mean nothing was produced. `AllCreatesFailed` was set from the exit codes alone, which printed `✅ javascript ready` directly above `✖ Every codeql database create call failed`. It now also requires that the salvage pass found nothing usable.

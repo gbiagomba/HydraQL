@@ -332,7 +332,15 @@ Pointing `--source-dir .` at `src` builds a database holding only
 `theo-android`, silently missing everything under `hz`. Neither `du` nor `find`
 reveals it, since neither follows symlinks by default.
 
-HydraQL reports this rather than letting it pass:
+HydraQL follows them instead, making each its own project:
+
+```
+↳ hz-nimbus-editor: following hz/nimbus-editor into /elsewhere/monorepo/mxp-modules/nimbus-editor
+```
+
+so a single `--source-dir .` reaches every one. The project is named after the
+link's path within the root, and `--no-follow-nested-symlinks` turns this off,
+leaving only a warning:
 
 ```
 ⚠️  src contains 4 symlinked directories that CodeQL will not follow:
@@ -343,14 +351,35 @@ HydraQL reports this rather than letting it pass:
      resolved target as its own --source-dir.
 ```
 
-So analyze the linked packages by making each one a project:
+#### Only the languages a project has
 
-```bash
-hydraql --build-root ./hz -d ./cqlDB -l javascript,typescript --build-only
+Each source root is walked once to record which requested languages actually
+have source, so a language a tree has none of is skipped rather than costing a
+full extraction attempt (and, for a compiled language, a build command run
+somewhere that cannot satisfy it):
+
+```
+⏭  hz-nimbus-editor: skipping python, java, swift (no source in this tree)
 ```
 
-and the real subtrees in their own runs into the same `--db-root`, so one scan
-covers every project afterwards.
+`.ts` and `.tsx` count toward `javascript`, matching CodeQL's extractor. The
+walk skips excluded and dot-directories and existing databases, never follows
+symlinks, and stops after two million entries; if it stops early every language
+is kept, since absence was never proven. `--all-langs` requests everything
+regardless.
+
+Taken together, one invocation covers a heterogeneous workspace:
+
+```bash
+hydraql --source-dir . -d . --db-prefix cqlDB_ \
+  -l javascript,typescript,python,kotlin,swift \
+  --build-command java="./build.sh build-android" \
+  --build-command swift="./build.sh build-ios" \
+  -q ~/Git/codeql -o all --allow-missing-db -f
+```
+
+The top-level tree builds javascript and python together plus java and swift
+with their own commands, and each symlinked package builds only javascript.
 
 ### Flag Reference
 
@@ -388,6 +417,8 @@ All flags support both a short form (`-X`) and the traditional long form (`--fla
 |       | `--build-command`       | _(none)_  | Build command, as codeql `--command`. Prefix with a language (`java=...`) to bind it (repeat for several) |
 |       | `--build-mode`          | _(none)_  | CodeQL build mode: `none`, `autobuild`, or `manual`    |
 |       | `--build-timeout`       | `0`       | Per-database creation timeout in seconds (`0` = none)  |
+|       | `--no-follow-nested-symlinks` | `false` | Only warn about symlinked dirs inside a source root, do not analyze them |
+|       | `--all-langs`           | `false`   | Request every `--langs` language per project, even with no source for it |
 |       | `--external`            | _(none)_  | External predicate data as `predicate=file.csv` (repeat for several) |
 | `-B`  | `--build-threads`       | `1`       | Concurrent database builds                             |
 | `-T`  | `--query-timeout`       | `600`     | Per-query timeout in seconds (`0` = no timeout)        |

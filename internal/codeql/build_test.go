@@ -561,8 +561,10 @@ func TestBuildOneCreatesDBRootForPerLanguageBuilds(t *testing.T) {
 		},
 		// DryRun would return before the directory work; a real run needs
 		// codeql, so this asserts on the directory alone by letting the
-		// creates fail afterwards.
+		// creates fail afterwards. AllLangs keeps the empty fixture from being
+		// skipped for having no source.
 		BuildTimeout: 1,
+		AllLangs:     true,
 	}
 
 	if len(groupLangs(cfg.Langs, cfg.CreateOptions)) < 2 {
@@ -591,7 +593,7 @@ func TestBuildOneCreatesParentForClusterBuilds(t *testing.T) {
 
 	dbPath := filepath.Join(root, "nested", "cqlDB_src")
 	p := Project{Name: "src", SourceRoot: src, DBPath: dbPath}
-	cfg := &BuildConfig{Langs: []string{"javascript"}, BuildTimeout: 1}
+	cfg := &BuildConfig{Langs: []string{"javascript"}, BuildTimeout: 1, AllLangs: true}
 
 	_ = buildOne(context.Background(), p, cfg)
 

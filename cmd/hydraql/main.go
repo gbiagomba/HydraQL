@@ -23,7 +23,7 @@ import (
 
 // version is overridable at link time via -X main.version (see Makefile LDFLAGS),
 // so it must stay a var: -X cannot patch a const.
-var version = "2.8.1"
+var version = "2.9.0"
 
 // stringSliceFlag supports repeated --flag value or --flag v1,v2,v3
 type stringSliceFlag []string
@@ -100,6 +100,10 @@ func main() {
 		"CodeQL build mode: none, autobuild, or manual (default: let CodeQL decide)")
 	buildTimeout := pflag.Int("build-timeout", 0, "Per-database creation timeout in seconds (0 = no timeout)")
 	buildThreads := pflag.IntP("build-threads", "B", 1, "Concurrent database builds")
+	noFollowNested := pflag.Bool("no-follow-nested-symlinks", false,
+		"Do not analyze symlinked directories found inside a source root (they are invisible to CodeQL)")
+	allLangs := pflag.Bool("all-langs", false,
+		"Request every --langs language for every project, even where no source for it was found")
 
 	// Timeout
 	queryTimeout := pflag.IntP("query-timeout", "T", 600, "Per-query timeout in seconds (0 = no timeout)")
@@ -188,6 +192,8 @@ func main() {
 		ResolveSymlinks:  resolveSymlinks,
 		Rebuild:          *rebuildDB,
 		AllowMissingDB:   *allowMissingDB,
+		FollowNested:     !*noFollowNested,
+		AllLangs:         *allLangs,
 		BuildTimeout:     *buildTimeout,
 		BuildThreads:     *buildThreads,
 		UnlockCache:      *unlockCache,

@@ -165,6 +165,9 @@ type Project struct {
 	RawPath    string // what the filesystem presented, before symlink resolution
 	SourceRoot string // absolute, symlinks resolved; this is what codeql receives
 	DBPath     string // <db-root>/<db-prefix><name>
+
+	Scan     SourceScan // what a walk of SourceRoot found
+	FromLink string     // the nested symlink this project was expanded from, if any
 }
 
 // BuildConfig drives database discovery and creation.
@@ -181,8 +184,16 @@ type BuildConfig struct {
 	ResolveSymlinks bool
 	Rebuild         bool
 	AllowMissingDB  bool
-	BuildTimeout    int // seconds; 0 = no timeout
-	BuildThreads    int
+
+	// FollowNested expands symlinked directories found inside a source root
+	// into projects of their own. CodeQL never follows them, so without this
+	// the code behind them is silently absent from every database.
+	FollowNested bool
+	// AllLangs requests every language for every project, even where no source
+	// for it was found.
+	AllLangs     bool
+	BuildTimeout int // seconds; 0 = no timeout
+	BuildThreads int
 
 	UnlockCache      bool
 	CheckLockProcess bool
@@ -389,7 +400,44 @@ func DiscoverProjects(cfg *BuildConfig) ([]Project, error) {
 		} else if cfg.Verbose {
 			fmt.Printf("  • %s: %s\n", name, p.SourceRoot)
 		}
-		warnNestedSymlinks(p, cfg)
+
+		p.Scan = ScanSourceRoot(p.SourceRoot, cfg.Exclude)
+		projects[len(projects)-1] = p
+		describeScan(p, cfg)
+
+		// A symlinked directory inside the source root is invisible to CodeQL.
+		// Analyzing it as its own project is the only way its code is seen.
+		if cfg.FollowNested {
+			for _, link := range p.Scan.Nested {
+				if strings.HasPrefix(link.Target, p.SourceRoot+string(filepath.Separator)) {
+					continue // already inside this root
+				}
+				if used[link.Target] {
+					continue
+				}
+				used[link.Target] = true
+
+				linkName := sanitizeName(strings.ReplaceAll(filepath.ToSlash(link.Rel), "/", "-"))
+				if used[linkName] {
+					linkName = sanitizeName(filepath.Base(link.Target))
+				}
+				used[linkName] = true
+
+				child := Project{
+					Name:       linkName,
+					RawPath:    filepath.Join(p.SourceRoot, link.Rel),
+					SourceRoot: link.Target,
+					DBPath:     filepath.Join(cfg.DBRoot, cfg.DBPrefix+linkName),
+					FromLink:   link.Rel,
+				}
+				child.Scan = ScanSourceRoot(child.SourceRoot, cfg.Exclude)
+				fmt.Printf("  ↳ %s: following %s into %s\n", linkName, link.Rel, link.Target)
+				describeScan(child, cfg)
+				projects = append(projects, child)
+			}
+		} else if len(p.Scan.Nested) > 0 {
+			warnNestedSymlinks(p, cfg)
+		}
 	}
 
 	sort.Slice(projects, func(i, j int) bool { return projects[i].Name < projects[j].Name })
@@ -439,6 +487,27 @@ func findNestedSymlinks(root string, exclude []string) (found []string, total in
 		return nil
 	})
 	return found, total
+}
+
+// describeScan reports what a source root actually contains.
+func describeScan(p Project, cfg *BuildConfig) {
+	if len(p.Scan.Languages) == 0 {
+		fmt.Printf("     %s⚠️  no recognized source found under %s%s\n",
+			report.Yellow, p.SourceRoot, report.Reset)
+		return
+	}
+	if !cfg.Verbose {
+		return
+	}
+	var parts []string
+	for _, lang := range AliasLangs(cfg.Langs) {
+		if n := p.Scan.Languages[lang]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", lang, n))
+		}
+	}
+	if len(parts) > 0 {
+		fmt.Printf("     source files: %s\n", strings.Join(parts, " "))
+	}
 }
 
 // warnNestedSymlinks reports source that will silently go unanalyzed.
@@ -557,16 +626,45 @@ type BuildOutcome struct {
 	Project Project
 	Usable  []string // languages with a scannable database
 	Empty   []string // languages without a scannable database
+	Skipped []string // languages not requested, for want of source
 
 	// AllCreatesFailed distinguishes "codeql never ran successfully" from
 	// "it ran but the build produced no code", which need different advice.
 	AllCreatesFailed bool
 }
 
-// OK reports whether at least one language is scannable.
-func (o BuildOutcome) OK() bool { return len(o.Usable) > 0 }
+// OK reports whether at least one language is scannable. A project skipped for
+// having no relevant source is not a failure.
+func (o BuildOutcome) OK() bool { return len(o.Usable) > 0 || len(o.Skipped) > 0 }
+
+// withLangs returns a copy of the config scoped to one project's languages.
+func (c *BuildConfig) withLangs(langs []string) *BuildConfig {
+	clone := *c
+	clone.Langs = langs
+	return &clone
+}
 
 func buildOne(ctx context.Context, p Project, cfg *BuildConfig) BuildOutcome {
+	// Requesting a language a project has no source for costs a full
+	// extraction attempt, and for a compiled language it also runs the build
+	// command in a tree that cannot satisfy it.
+	langs := cfg.Langs
+	if !cfg.AllLangs {
+		present, absent := p.Scan.PresentLangs(cfg.Langs)
+		if len(present) == 0 {
+			fmt.Printf("  %s⏭  %s: none of %s has source here; skipping%s\n",
+				report.Yellow, p.Name, strings.Join(cfg.Langs, ","), report.Reset)
+			return BuildOutcome{Project: p, Skipped: absent}
+		}
+		if len(absent) > 0 {
+			fmt.Printf("  ⏭  %s: skipping %s (no source in this tree)\n",
+				p.Name, strings.Join(absent, ", "))
+		}
+		langs = present
+	}
+
+	// buildOne works from the project's own language set from here on.
+	cfg = cfg.withLangs(langs)
 	groups := groupLangs(cfg.Langs, cfg.CreateOptions)
 
 	if !cfg.Rebuild && clusterReady(p.DBPath, cfg.Langs) {
